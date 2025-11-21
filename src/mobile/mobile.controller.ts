@@ -31,25 +31,27 @@ export class MobileController {
 
   /**
    * POST /mobile/shifts/:id/check-in
-   * Body: { staffId: "STAFF_DEMO" }
+   * Body: { staffId: "STAFF_DEMO", clientTime?: "2025-11-21T03:15:04.324Z" }
    */
   @Post('shifts/:id/check-in')
   checkIn(
     @Param('id') shiftId: string,
     @Body('staffId') staffId: string,
+    @Body('clientTime') clientTime?: string,
   ) {
-    return this.mobileService.checkInShift(shiftId, staffId);
+    return this.mobileService.checkInShift(shiftId, staffId, clientTime);
   }
 
   /**
    * POST /mobile/shifts/:id/check-out
-   * Body: { staffId: "STAFF_DEMO" }
+   * Body: { staffId: "STAFF_DEMO", clientTime?: "2025-11-21T05:55:10.000Z" }
    */
   @Post('shifts/:id/check-out')
   checkOut(
     @Param('id') shiftId: string,
     @Body('staffId') staffId: string,
+    @Body('clientTime') clientTime?: string,
   ) {
-    return this.mobileService.checkOutShift(shiftId, staffId);
+    return this.mobileService.checkOutShift(shiftId, staffId, clientTime);
   }
 }

@@ -80,7 +80,7 @@ export interface TimesheetEntry {
   shiftId: string;
   staffId: string;
   mode: CheckMode; // IN / OUT
-  time: string; // ISO timestamp
+  time: string; // ISO timestamp (ưu tiên giờ gửi từ device)
 }
 
 /**
@@ -101,45 +101,82 @@ export class MobileService {
   private timesheets: TimesheetEntry[] = [];
   private timesheetCounter = 1;
 
-  // Bộ nhớ tạm giữ ca trực của hôm nay (mock 1 ca duy nhất)
-  private currentShift: MobileShift | null = null;
-
   /**
    * Mock Today’s Shifts cho 1 staff
+   * + Tính trạng thái theo timesheets (NOT_STARTED / IN_PROGRESS / COMPLETED)
+   * + Gán visitStart / visitEnd theo lần IN/OUT thực tế trong ngày đó
    */
   getTodayShifts(staffId: string, date: string): { shifts: MobileShift[] } {
-    // Nếu chưa có currentShift, hoặc ngày khác → tạo ca mới
-    if (!this.currentShift || this.currentShift.date !== date) {
-      this.currentShift = {
-        id: '1',
-        date,
-        individualId: 'IND001',
-        individualName: 'Donald Wilbur',
-        individualDob: '01/15/1985',
-        individualMa: 'MA123456',
-        individualAddress: '123 Main St, Altoona, PA 16602',
-        serviceCode: 'COMP',
-        serviceName: 'COMP – Companion',
-        location: 'Home – Altoona, PA',
-        scheduleStart: '08:00',
-        scheduleEnd: '12:00',
-        status: 'NOT_STARTED',
-        visitStart: null,
-        visitEnd: null,
-        outcomeText: 'Increase independence with daily living skills at home.',
-      };
+    // Mock một ca cố định
+    const baseShift: MobileShift = {
+      id: '1',
+      date,
+      individualId: 'IND001',
+      individualName: 'Donald Wilbur',
+      individualDob: '01/15/1985',
+      individualMa: 'MA123456',
+      individualAddress: '123 Main St, Altoona, PA 16602',
+      serviceCode: 'COMP',
+      serviceName: 'COMP – Companion',
+      location: 'Home – Altoona, PA',
+      scheduleStart: '08:00',
+      scheduleEnd: '12:00',
+      status: 'NOT_STARTED',
+      visitStart: null,
+      visitEnd: null,
+      outcomeText: 'Increase independence with daily living skills at home.',
+    };
+
+    // Lọc timesheet của ca này, staff này, đúng ngày
+    const entriesForDay = this.timesheets.filter((e) => {
+      if (e.shiftId !== baseShift.id || e.staffId !== staffId) return false;
+      const entryDate = e.time.substring(0, 10); // "YYYY-MM-DD"
+      return entryDate === date;
+    });
+
+    let currentShift: MobileShift = { ...baseShift };
+
+    if (entriesForDay.length > 0) {
+      const inEntries = entriesForDay.filter((e) => e.mode === 'IN');
+      const outEntries = entriesForDay.filter((e) => e.mode === 'OUT');
+
+      const hasIn = inEntries.length > 0;
+      const hasOut = outEntries.length > 0;
+
+      if (hasIn && !hasOut) {
+        currentShift.status = 'IN_PROGRESS';
+      } else if (hasIn && hasOut) {
+        currentShift.status = 'COMPLETED';
+      }
+
+      if (hasIn) {
+        const earliestIn = inEntries.reduce((min, e) =>
+          e.time < min.time ? e : min,
+        );
+        currentShift.visitStart = earliestIn.time;
+      }
+
+      if (hasOut) {
+        const latestOut = outEntries.reduce((max, e) =>
+          e.time > max.time ? e : max,
+        );
+        currentShift.visitEnd = latestOut.time;
+      }
     }
 
     console.log('[MobileService] getTodayShifts for', { staffId, date });
-    console.log('[MobileService] -> currentShift:', this.currentShift);
+    console.log('[MobileService] -> currentShift:', currentShift);
 
-    return { shifts: [this.currentShift] };
+    return { shifts: [currentShift] };
   }
 
   /**
    * Nhận Daily Note từ mobile (đang chỉ log ra console)
    */
-  submitDailyNote(payload: MobileDailyNotePayload): { status: 'OK'; id: string } {
+  submitDailyNote(payload: MobileDailyNotePayload): {
+    status: 'OK';
+    id: string;
+  } {
     const id = `DN_${Date.now()}`;
 
     console.log('[MobileService] submitDailyNote payload:', payload);
@@ -149,28 +186,16 @@ export class MobileService {
   }
 
   /**
-   * Check in – tạo 1 timesheet entry (mock) + cập nhật status/visitStart
+   * Check in – tạo 1 timesheet entry (mock)
+   * Nếu mobile gửi clientTime thì dùng luôn clientTime làm giờ chính thức.
    */
-  checkInShift(shiftId: string, staffId: string): CheckInOutResponse {
-    const time = new Date().toISOString();
+  checkInShift(
+    shiftId: string,
+    staffId: string,
+    clientTime?: string,
+  ): CheckInOutResponse {
+    const time = clientTime || new Date().toISOString();
     const timesheetId = `TS_${this.timesheetCounter++}`;
-
-    // Cập nhật ca trực hiện tại nếu khớp id
-    if (this.currentShift && this.currentShift.id === shiftId) {
-      if (!this.currentShift.visitStart) {
-        this.currentShift.visitStart = time;
-      }
-      // Nếu đang NOT_STARTED thì chuyển sang IN_PROGRESS
-      if (this.currentShift.status === 'NOT_STARTED') {
-        this.currentShift.status = 'IN_PROGRESS';
-      }
-    } else {
-      console.warn(
-        '[MobileService] checkInShift: no currentShift matched',
-        shiftId,
-        this.currentShift,
-      );
-    }
 
     const entry: TimesheetEntry = {
       id: timesheetId,
@@ -195,25 +220,16 @@ export class MobileService {
   }
 
   /**
-   * Check out – tạo 1 timesheet entry (mock) + cập nhật status/visitEnd
+   * Check out – tạo 1 timesheet entry (mock)
+   * Nếu mobile gửi clientTime thì dùng luôn clientTime làm giờ chính thức.
    */
-  checkOutShift(shiftId: string, staffId: string): CheckInOutResponse {
-    const time = new Date().toISOString();
+  checkOutShift(
+    shiftId: string,
+    staffId: string,
+    clientTime?: string,
+  ): CheckInOutResponse {
+    const time = clientTime || new Date().toISOString();
     const timesheetId = `TS_${this.timesheetCounter++}`;
-
-    // Cập nhật ca trực hiện tại nếu khớp id
-    if (this.currentShift && this.currentShift.id === shiftId) {
-      if (!this.currentShift.visitEnd) {
-        this.currentShift.visitEnd = time;
-      }
-      this.currentShift.status = 'COMPLETED';
-    } else {
-      console.warn(
-        '[MobileService] checkOutShift: no currentShift matched',
-        shiftId,
-        this.currentShift,
-      );
-    }
 
     const entry: TimesheetEntry = {
       id: timesheetId,
