@@ -1,0 +1,749 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" // Dùng PostgreSQL (Supabase)
+  url      = env("DATABASE_URL")
+}
+
+/**
+ * Individual = hồ sơ bệnh nhân/khách hàng
+ * code      = mã hiển thị: IND-2025-000001
+ */
+model Individual {
+  id   String @id @default(cuid()) // khoá kỹ thuật
+  code String @unique // mã hiển thị, sẽ sinh từ Counter
+
+  firstName  String
+  middleName String?
+  lastName   String
+  dob        String // YYYY-MM-DD
+  gender     String?
+  ssnLast4   String? // chỉ 4 số
+
+  branch   String
+  location String
+
+  primaryPhone   String?
+  secondaryPhone String?
+  email          String?
+
+  address1 String?
+  address2 String?
+  city     String?
+  county   String?
+  state    String?
+  zip      String?
+
+  // acceptedServices: form gửi lên là mảng string, DB lưu dạng CSV cho đơn giản
+  acceptedServices String
+
+  // Emergency contacts
+  emergency1Name           String?
+  emergency1Relationship   String?
+  emergency1PhonePrimary   String?
+  emergency1PhoneSecondary String?
+  emergency1Notes          String?
+
+  emergency2Name           String?
+  emergency2Relationship   String?
+  emergency2PhonePrimary   String?
+  emergency2PhoneSecondary String?
+  emergency2Notes          String?
+
+  // Billing / guardian
+  billingSameAsPrimary Boolean @default(true)
+  billingAddress1      String?
+  billingAddress2      String?
+  billingCity          String?
+  billingState         String?
+  billingZip           String?
+
+  guardianName  String?
+  guardianPhone String?
+  repPayeeName  String?
+  repPayeePhone String?
+
+  // Clinical
+  pcpName    String?
+  pcpPhone   String?
+  pcpFax     String?
+  pcpNpi     String?
+  pcpAddress String?
+  allergies  String?
+
+  // Preparedness / equipment
+  priorityCode       String?
+  mobility           String?
+  equipOxygen        Boolean @default(false)
+  equip_cpap         Boolean @default(false)
+  equip_ventilator   Boolean @default(false)
+  equip_iv_pump      Boolean @default(false)
+  equip_syringe_pump Boolean @default(false)
+  equip_feeding_tube Boolean @default(false)
+  equip_nebulizer    Boolean @default(false)
+  equip_wheelchair   Boolean @default(false)
+  equip_hospital_bed Boolean @default(false)
+  equipOther         String?
+
+  // Preferences
+  prefTime        String?
+  prefNotes       String?
+  langPrimary     String?
+  langSecondary   String?
+  caregiverGender String?
+  prefOther       String?
+
+  // Advanced directives
+  advType      String?
+  advDateIn    String?
+  advDateOut   String?
+  advStatus    String?
+  advPhysician String?
+  advAttach    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payers      Payer[]
+  medications Medication[]
+  diagnoses   Diagnosis[]
+
+  // Relations mới cho Schedule / Visit / ISP
+  masterScheduleTemplates MasterScheduleTemplate[]
+  scheduleWeeks           ScheduleWeek[]
+  scheduleShifts          ScheduleShift[]
+  visits                  Visit[]
+  ispAllocations          ISPAllocation[]
+
+  // ISP & BSP form (lưu toàn bộ dữ liệu form dạng JSON)
+  ispBspForm IspBspForm?
+}
+
+/**
+ * Employee = hồ sơ nhân viên Blue Angels Care
+ * employeeId = mã hiển thị: BAC-E-2025-001 (nhập từ form, sau này có thể sinh tự động bằng Counter)
+ */
+model Employee {
+  id String @id @default(cuid()) // khoá kỹ thuật
+
+  // Demographics
+  firstName  String
+  middleName String?
+  lastName   String
+  dob        String? // YYYY-MM-DD
+  gender     String?
+  phone      String?
+  email      String
+
+  educationLevel String? // trình độ học vấn/chuyên môn
+  ssn            String? // 9 digits
+
+  // Employment Info
+  employeeId      String  @unique // BAC-E-2025-001
+  role            String? // DSP / Nurse / Supervisor / ...
+  status          String? // Active / On Leave / Inactive
+  hireDate        String? // YYYY-MM-DD
+  terminationDate String? // YYYY-MM-DD
+  employmentType  String? // Full-time / Part-time / Per-diem / Contract
+  branch          String? // Altoona / Hollidaysburg / ...
+  workLocation    String? // mô tả chi tiết hơn location
+  supervisorName  String? // tên supervisor trực tiếp
+
+  // Address
+  address1 String?
+  address2 String?
+  city     String?
+  state    String?
+  zip      String?
+
+  // Emergency Contact
+  emergencyName              String?
+  emergencyRelationship      String?
+  emergencyPhone             String?
+  emergencyEmail             String?
+  emergencyPreferredLanguage String?
+  emergencyAddress           String?
+
+  // Work Preferences
+  preferredShift  String? // Morning / Afternoon / Evening / Overnight
+  canWorkWeekends Boolean @default(false)
+  canWorkHolidays Boolean @default(false)
+  maxWeeklyHours  Int?
+  notes           String?
+
+  // Notification Preferences
+  notifyByEmail       Boolean @default(true)
+  notifyBySMS         Boolean @default(false)
+  notifyByInApp       Boolean @default(true)
+  sendScheduleChanges Boolean @default(true)
+  sendPayrollUpdates  Boolean @default(true)
+  sendPolicyUpdates   Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations mới
+  templateDefaultShifts MasterTemplateShift[] @relation("TemplateDefaultDSP")
+  plannedShifts         ScheduleShift[]       @relation("PlannedDSP")
+  actualShifts          ScheduleShift[]       @relation("ActualDSP")
+  visits                Visit[]               @relation("VisitDSP")
+
+  // Supervisors cho Admin Users
+  userSupervisors UserSupervisor[]
+}
+
+/**
+ * Payer: các đối tượng thanh toán: Primary / Secondary
+ */
+model Payer {
+  id          String  @id @default(cuid())
+  type        String // "Primary" | "Secondary"
+  name        String
+  plan        String?
+  memberId    String
+  groupId     String?
+  startDate   String?
+  endDate     String?
+  eligibility String? // Verified | Pending | Not Eligible
+  notes       String?
+
+  individualId String
+  individual   Individual @relation(fields: [individualId], references: [id], onDelete: Cascade)
+
+  ispAllocations ISPAllocation[]
+}
+
+/**
+ * Medications
+ */
+model Medication {
+  id       String  @id @default(cuid())
+  name     String
+  dose     String?
+  schedule String?
+
+  individualId String
+  individual   Individual @relation(fields: [individualId], references: [id], onDelete: Cascade)
+}
+
+/**
+ * Diagnoses (ICD)
+ */
+model Diagnosis {
+  id          String  @id @default(cuid())
+  icd         String
+  description String?
+  onset       String? // YYYY-MM-DD
+
+  individualId String
+  individual   Individual @relation(fields: [individualId], references: [id], onDelete: Cascade)
+}
+
+/**
+ * Counter dùng để sinh code: IND-2025-000001, IND-2025-000002, ...
+ * (sau này có thể xài chung cho Employee, ví dụ id = "EMP-2025")
+ */
+model Counter {
+  id    String @id // ví dụ: "IND-2025"
+  value Int
+}
+
+/**
+ * Service = danh mục dịch vụ (dùng cho Accepted Services + scheduling + billing)
+ */
+model Service {
+  id String @id @default(cuid()) // technical id
+
+  // Short code dùng chung với Accepted Services (PCA, NT, PBIS...)
+  serviceCode String @unique // e.g. "PCA"
+
+  // Tên đầy đủ: "Personal Care Assistant"
+  serviceName String
+
+  // Mã billing / code show cho payer (SVC-001, T1019...)
+  billingCode String?
+
+  // "None-Residential" | "Residential service"
+  category String
+
+  // Mô tả dịch vụ
+  description String?
+
+  // "Active" | "Inactive"
+  status String
+
+  // Có dùng để claim/billing không
+  billable Boolean @default(true)
+
+  // Ghi chú nội bộ
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations mới
+  masterTemplateShifts MasterTemplateShift[]
+  scheduleShifts       ScheduleShift[]
+  visits               Visit[]
+  ispAllocations       ISPAllocation[]
+}
+
+// =====================================================
+//  ENUMS CHO SCHEDULE / VISIT
+// =====================================================
+
+enum ScheduleStatus {
+  NOT_STARTED // chưa đến giờ, chưa có visit
+  IN_PROGRESS // đã check in, chưa check out
+  COMPLETED // có visit đầy đủ, đã đối soát
+  NOT_COMPLETED // có check in nhưng hết ca mà chưa check out
+  CANCELLED // ca bị hủy (thường do Individual)
+  BACKUP_PLAN // ca có backup DSP thay thế DSP gốc
+}
+
+enum VisitSource {
+  MOBILE // DSP check in/out từ app điện thoại
+  OFFICE_EDIT // văn phòng nhập / chỉnh tay
+  AUTO_MATCH // hệ thống tự gắn visit với ca schedule
+}
+
+enum CancelledBy {
+  INDIVIDUAL
+  DSP
+  OFFICE
+}
+
+// =====================================================
+//  MASTER SCHEDULE TEMPLATE (lịch cứng – Master Week)
+// =====================================================
+
+model MasterScheduleTemplate {
+  id            String    @id @default(cuid())
+  individualId  String
+  name          String? // VD: "Weekday template"
+  effectiveFrom DateTime // ngày bắt đầu áp dụng
+  effectiveTo   DateTime? // null = áp dụng vô thời hạn
+  isActive      Boolean   @default(true)
+  notes         String?
+
+  individual    Individual            @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  shifts        MasterTemplateShift[]
+  scheduleWeeks ScheduleWeek[] // đầu kia của relation
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([individualId, isActive])
+}
+
+model MasterTemplateShift {
+  id         String @id @default(cuid())
+  templateId String
+  dayOfWeek  Int // 0 = Sun, 6 = Sat
+  serviceId  String
+
+  // Thời gian trong ngày, tính theo phút từ 00:00 (VD: 7h = 420)
+  startMinutes Int
+  endMinutes   Int
+
+  // DSP mặc định (có thể null, thực tế assign ở Weekly)
+  defaultDspId String?
+  billable     Boolean @default(true)
+  notes        String?
+
+  template   MasterScheduleTemplate @relation(fields: [templateId], references: [id])
+  service    Service                @relation(fields: [serviceId], references: [id])
+  defaultDsp Employee?              @relation("TemplateDefaultDSP", fields: [defaultDspId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([templateId, dayOfWeek])
+}
+
+// =====================================================
+//  WEEKLY SCHEDULE (PLAN) – hiển thị ở Weekly Detail
+// =====================================================
+
+model ScheduleWeek {
+  id                    String   @id @default(cuid())
+  individualId          String
+  templateId            String? // generate từ template nào (nếu có)
+  weekStart             DateTime // Chủ nhật 00:00
+  weekEnd               DateTime // Thứ 7 23:59 hoặc weekStart + 7 ngày
+  generatedFromTemplate Boolean  @default(true)
+  notes                 String?
+  locked                Boolean  @default(false) // đã khóa khi payroll/billing xong
+
+  individual Individual              @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  template   MasterScheduleTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  shifts     ScheduleShift[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([individualId, weekStart])
+}
+
+model ScheduleShift {
+  id           String @id @default(cuid())
+  weekId       String
+  individualId String
+  serviceId    String
+
+  // DSP gốc (plan) và DSP thực tế (backup hoặc trùng luôn)
+  plannedDspId String?
+  actualDspId  String?
+
+  scheduleDate DateTime // ngày của ca (00:00)
+  plannedStart DateTime // thời gian bắt đầu plan
+  plannedEnd   DateTime // thời gian kết thúc plan
+
+  status ScheduleStatus @default(NOT_STARTED)
+
+  cancelledBy  CancelledBy?
+  cancelledAt  DateTime?
+  cancelReason String?
+
+  backupNote String? // "ABC replacing Garret due to ..."
+
+  billable Boolean @default(true)
+  notes    String?
+
+  week       ScheduleWeek @relation(fields: [weekId], references: [id])
+  individual Individual   @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  service    Service      @relation(fields: [serviceId], references: [id])
+
+  plannedDsp Employee? @relation("PlannedDSP", fields: [plannedDspId], references: [id])
+  actualDsp  Employee? @relation("ActualDSP", fields: [actualDspId], references: [id])
+
+  visits Visit[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([weekId])
+  @@index([scheduleDate])
+  @@index([individualId, scheduleDate])
+  @@index([plannedDspId, scheduleDate])
+  @@index([actualDspId, scheduleDate])
+}
+
+// =====================================================
+//  VISIT (thực tế – Check in/Out) – cho Billing & Payroll
+// =====================================================
+
+model Visit {
+  id String @id @default(cuid())
+
+  scheduleShiftId String? // có thể null nếu là unscheduled / backup chưa gắn ca
+  individualId    String
+  dspId           String
+  serviceId       String?
+
+  checkInAt  DateTime
+  checkOutAt DateTime?
+
+  source VisitSource @default(MOBILE)
+
+  // cache sẵn để report nhanh (tính khi close visit)
+  durationMinutes   Int? // tổng số phút (Out - In, có xử lý qua ngày)
+  units             Int? // số unit 15 phút
+  isBillable        Boolean @default(true)
+  nonBillableReason String?
+
+  gpsLatitude  Float? // optional – sau này dùng cho GPS
+  gpsLongitude Float?
+
+  scheduleShift ScheduleShift? @relation(fields: [scheduleShiftId], references: [id])
+  individual    Individual     @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  dsp           Employee       @relation("VisitDSP", fields: [dspId], references: [id])
+  service       Service?       @relation(fields: [serviceId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([scheduleShiftId])
+  @@index([dspId, checkInAt])
+  @@index([individualId, checkInAt])
+}
+
+// =====================================================
+//  ISP ALLOCATION (Hợp đồng ISP – units được cấp)
+// =====================================================
+
+model ISPAllocation {
+  id           String  @id @default(cuid())
+  individualId String
+  serviceId    String
+  payerId      String? // Medicaid, ODP, etc.
+
+  startDate DateTime // ngày bắt đầu ủy quyền
+  endDate   DateTime? // ngày kết thúc (hết hợp đồng)
+
+  unitsPerWeek         Int? // ISP quy định mỗi tuần bao nhiêu unit
+  unitsPerMonth        Int? // hoặc mỗi tháng
+  totalAuthorizedUnits Int? // tổng số unit cho cả hợp đồng
+
+  notes String?
+
+  individual Individual @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  service    Service    @relation(fields: [serviceId], references: [id])
+  payer      Payer?     @relation(fields: [payerId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([individualId, serviceId, startDate])
+}
+
+// =====================================================
+//  ISP & BSP FORM (lưu toàn bộ form dạng JSON)
+// =====================================================
+
+model IspBspForm {
+  id           String @id @default(cuid())
+  individualId String @unique
+  formData     Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  individual Individual @relation(fields: [individualId], references: [id], onDelete: Cascade)
+}
+
+// =====================================================
+//  ADMIN USERS / ROLES / PRIVILEGES
+// =====================================================
+
+model User {
+  id        String  @id @default(cuid())
+  email     String  @unique
+  firstName String
+  lastName  String
+  locked    Boolean @default(false)
+  userType  String  @default("ADMIN") // ADMIN / COORDINATOR / DSP / ...
+
+  roles       UserRole[]
+  privileges  UserPrivilege[]
+  supervisors UserSupervisor[]
+
+  // ====== NEW: password fields ======
+  passwordHash      String?
+  passwordSalt      String?
+  passwordUpdatedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("admin_users")
+}
+
+model Role {
+  id          String  @id @default(cuid())
+  code        String  @unique // vd: "COORDINATOR"
+  name        String // label hiển thị đẹp
+  description String?
+
+  users UserRole[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("admin_roles")
+}
+
+model Privilege {
+  id          String  @id @default(cuid())
+  code        String  @unique // vd: "CLIENT_ACCESS_MODULE"
+  name        String // label hiển thị dài
+  description String?
+
+  users UserPrivilege[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("admin_privileges")
+}
+
+model UserRole {
+  id     String @id @default(cuid())
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  roleId String
+
+  @@unique([userId, roleId])
+  @@map("admin_user_roles")
+}
+
+model UserPrivilege {
+  id          String    @id @default(cuid())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  privilege   Privilege @relation(fields: [privilegeId], references: [id], onDelete: Cascade)
+  privilegeId String
+
+  @@unique([userId, privilegeId])
+  @@map("admin_user_privileges")
+}
+
+model UserSupervisor {
+  id           String   @id @default(cuid())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId       String
+  supervisor   Employee @relation(fields: [supervisorId], references: [id], onDelete: Cascade)
+  supervisorId String
+
+  @@unique([userId, supervisorId])
+  @@map("admin_user_supervisors")
+}
+
+// =====================================================
+//  MEDICATION MODULE (Orders, MAR, Inventory, Incidents)
+// =====================================================
+
+// Loại order: thuốc lịch (Scheduled) hay PRN
+enum MedicationType {
+  SCHEDULED
+  PRN
+}
+
+// Trạng thái order
+enum MedicationOrderStatus {
+  ACTIVE
+  ON_HOLD
+  DISCONTINUED
+}
+
+// Trạng thái từng lần uống/tiêm trong MAR
+enum MedicationAdminStatus {
+  GIVEN
+  REFUSED
+  MISSED
+  HELD
+  LATE
+  ERROR
+}
+
+// Mức độ nghiêm trọng của incident
+enum MedicationIncidentSeverity {
+  LOW
+  MODERATE
+  HIGH
+}
+
+// Trạng thái xử lý incident
+enum MedicationIncidentStatus {
+  OPEN
+  IN_REVIEW
+  CLOSED
+}
+
+/**
+ * MedicationOrder = y lệnh thuốc (đơn thuốc) cho từng Individual
+ */
+model MedicationOrder {
+  id             String                @id @default(cuid())
+  individualId   String // link sang Individual qua id (string)
+  medicationName String
+  form           String? // tablet, capsule, solution...
+  doseValue      Float
+  doseUnit       String // mg, ml, tablet...
+  route          String // PO, IM, IV, SQ...
+  type           MedicationType
+  frequencyText  String? // “BID”, “QHS”…
+  timesOfDay     String[]              @default([])
+  startDate      DateTime
+  endDate        DateTime?
+  status         MedicationOrderStatus @default(ACTIVE)
+
+  prescriberName String?
+  pharmacyName   String?
+  indications    String? // lý do dùng thuốc
+  allergyFlag    Boolean @default(false)
+
+  // Relations nội bộ Medication
+  administrations MedicationAdministration[]
+  inventoryItems  MedicationInventory[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([individualId, status])
+}
+
+/**
+ * MedicationAdministration = mỗi lần cấp thuốc trong MAR
+ */
+model MedicationAdministration {
+  id      String          @id @default(cuid())
+  orderId String
+  order   MedicationOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  individualId      String // lưu thêm để query nhanh
+  scheduledDateTime DateTime
+  actualDateTime    DateTime?
+  status            MedicationAdminStatus
+  reason            String? // reason/refused/missed...
+  vitalsSummary     String? // "BP 120/70, HR 76, BG 145"
+  staffId           String? // id DSP
+  staffName         String? // tên DSP, cache để không phải join
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([individualId, scheduledDateTime])
+  @@index([orderId, scheduledDateTime])
+}
+
+/**
+ * MedicationInventory = tồn kho thuốc theo từng Individual
+ */
+model MedicationInventory {
+  id      String           @id @default(cuid())
+  orderId String?
+  order   MedicationOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  individualId    String
+  medicationName  String // cache tên thuốc để xem nhanh
+  isControlled    Boolean   @default(false)
+  currentQuantity Float
+  unit            String // tablet, ml...
+  minThreshold    Float     @default(0)
+  daysRemaining   Int?
+  lastCountDate   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([individualId])
+  @@index([individualId, isControlled])
+}
+
+/**
+ * MedicationIncident = lỗi thuốc, Missed dose, Medication error...
+ */
+model MedicationIncident {
+  id             String                     @id @default(cuid())
+  individualId   String
+  individualName String
+  date           DateTime
+  medicationName String?
+  type           String // "Missed Dose", "Medication Error", ...
+  severity       MedicationIncidentSeverity
+  status         MedicationIncidentStatus   @default(OPEN)
+  notes          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([individualId, date])
+  @@index([severity])
+  @@index([status])
+}

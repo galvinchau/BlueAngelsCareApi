@@ -1,5 +1,6 @@
 // src/mobile/mobile.service.ts
 import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
 
 /**
  * Loại trạng thái ca trực trên mobile
@@ -97,6 +98,9 @@ export interface CheckInOutResponse {
 
 @Injectable()
 export class MobileService {
+  // Inject PrismaService để sau này dùng query DB thật
+  constructor(private readonly prisma: PrismaService) {}
+
   // Bộ nhớ tạm để giữ timesheet (mỗi lần restart Nest sẽ mất – tạm chấp nhận)
   private timesheets: TimesheetEntry[] = [];
   private timesheetCounter = 1;
