@@ -1,4 +1,7 @@
-// src/mobile/mobile.service.ts
+// ======================================================
+//  src/mobile/mobile.service.ts  (UPDATED – FIX TIMEZONE)
+// ======================================================
+
 import { Injectable } from '@nestjs/common';
 import {
   ScheduleStatus,
@@ -39,7 +42,6 @@ export interface MobileShift {
 
 /**
  * Payload Daily Note gửi từ mobile lên
- * (giữ dạng any cho đơn giản, sau này map sang schema thật của BAC-HMS)
  */
 export interface MobileDailyNotePayload {
   shiftId: string;
@@ -79,34 +81,31 @@ export interface MobileDailyNotePayload {
   certifyText?: string;
 }
 
-/**
- * Timesheet “mock” cũ – giữ type lại để status CheckInOutResponse dùng cho mobile
- */
 export type CheckMode = 'IN' | 'OUT';
 
-/**
- * Response cho mobile khi Check in / Check out
- */
 export interface CheckInOutResponse {
   status: 'OK';
   mode: CheckMode;
   shiftId: string;
   staffId: string;
   time: string;
-  timesheetId: string; // dùng Visit.id cho đồng bộ
+  timesheetId: string;
 }
 
 /**
- * Helper: format DateTime -> "HH:mm"
+ * ============= FIXED: FORMAT GIỜ LOCAL, KHÔNG DÙNG UTC =================
  */
 function formatTimeHHmm(dt: Date | null | undefined): string | null {
   if (!dt) return null;
-  // Dùng ISO rồi cắt HH:MM cho đơn giản (UTC); sau này có thể chỉnh timezone nếu cần
-  return dt.toISOString().substring(11, 16);
+
+  // LẤY GIỜ THEO LOCAL TIME (KHÔNG UTC)
+  const hh = dt.getHours().toString().padStart(2, '0');
+  const mm = dt.getMinutes().toString().padStart(2, '0');
+  return `${hh}:${mm}`;
 }
 
 /**
- * Helper: format địa chỉ full string
+ * Helper: format địa chỉ
  */
 function formatAddress(ind: Individual): string {
   const parts = [
@@ -122,7 +121,7 @@ function formatAddress(ind: Individual): string {
 }
 
 /**
- * Helper: map ScheduleShift + relations -> MobileShift
+ * Helper: map ScheduleShift -> MobileShift
  */
 function mapShiftToMobileShift(params: {
   shift: ScheduleShift & {
@@ -131,14 +130,14 @@ function mapShiftToMobileShift(params: {
     visits: Visit[];
   };
   staffId: string;
-  date: string; // YYYY-MM-DD
+  date: string;
 }): MobileShift {
   const { shift, staffId, date } = params;
   const individual = shift.individual;
   const service = shift.service;
   const visits = shift.visits ?? [];
 
-  // Mặc định status dựa vào ScheduleStatus
+  // Status
   let status: ShiftStatus = 'NOT_STARTED';
   switch (shift.status) {
     case ScheduleStatus.IN_PROGRESS:
@@ -148,11 +147,9 @@ function mapShiftToMobileShift(params: {
     case ScheduleStatus.NOT_COMPLETED:
       status = 'COMPLETED';
       break;
-    default:
-      status = 'NOT_STARTED';
   }
 
-  // Lấy visits trong ngày cho đúng DSP (filter thêm lần nữa cho chắc)
+  // Visit
   const visitsForDsp = visits.filter(
     (v) =>
       v.dspId === staffId &&
@@ -164,11 +161,11 @@ function mapShiftToMobileShift(params: {
   let visitEnd: string | null = null;
 
   if (visitsForDsp.length > 0) {
-    const sortedByIn = [...visitsForDsp].sort((a, b) =>
+    const earliest = [...visitsForDsp].sort((a, b) =>
       a.checkInAt < b.checkInAt ? -1 : 1,
-    );
-    const earliest = sortedByIn[0];
-    const latest = sortedByIn.reduce((max, v) =>
+    )[0];
+
+    const latest = visitsForDsp.reduce((max, v) =>
       (v.checkOutAt ?? v.checkInAt) > (max.checkOutAt ?? max.checkInAt)
         ? v
         : max,
@@ -177,13 +174,8 @@ function mapShiftToMobileShift(params: {
     visitStart = formatTimeHHmm(earliest.checkInAt);
     visitEnd = formatTimeHHmm(latest.checkOutAt ?? latest.checkInAt);
 
-    // Nếu đã có check in mà chưa có check out => IN_PROGRESS
-    const anyWithoutOut = visitsForDsp.some((v) => !v.checkOutAt);
-    if (anyWithoutOut) {
-      status = 'IN_PROGRESS';
-    } else {
-      status = 'COMPLETED';
-    }
+    if (visitsForDsp.some((v) => !v.checkOutAt)) status = 'IN_PROGRESS';
+    else status = 'COMPLETED';
   }
 
   return {
@@ -192,40 +184,30 @@ function mapShiftToMobileShift(params: {
     individualId: individual.id,
     individualName: `${individual.firstName} ${individual.lastName}`.trim(),
     individualDob: individual.dob ?? '',
-    // Hiện schema Individual chưa có trường MA#, tạm để trống – sau này map thêm field medicaidId nếu có
     individualMa: '',
     individualAddress: formatAddress(individual),
     serviceCode: service.serviceCode,
     serviceName: service.serviceName,
-    location: individual.location ?? '', // tạm lấy từ Individual.location
+    location: individual.location ?? '',
     scheduleStart: formatTimeHHmm(shift.plannedStart) ?? '',
     scheduleEnd: formatTimeHHmm(shift.plannedEnd) ?? '',
     status,
     visitStart,
     visitEnd,
-    // Hiện chưa có OutcomeText trong schedule/visit → để null, sau này nối với ISP/BSP hoặc Daily Note
     outcomeText: null,
   };
 }
 
 @Injectable()
 export class MobileService {
-  // Inject PrismaService để query DB thật
   constructor(private readonly prisma: PrismaService) {}
 
-  /**
-   * Today’s Shifts cho 1 staff (dùng DB thật)
-   * - Lấy ScheduleShift của DSP trong ngày (plannedDspId/actualDspId = staffId)
-   * - Join Individual + Service + Visits
-   * - Tính status/visitStart/visitEnd dựa trên Visit
-   */
   async getTodayShifts(
     staffId: string,
     date: string,
   ): Promise<{ shifts: MobileShift[] }> {
-    // date dạng "YYYY-MM-DD"
-    const dayStart = new Date(`${date}T00:00:00.000Z`);
-    const dayEnd = new Date(`${date}T23:59:59.999Z`);
+    const dayStart = new Date(`${date}T00:00:00`);
+    const dayEnd = new Date(`${date}T23:59:59`);
 
     const shifts = await this.prisma.scheduleShift.findMany({
       where: {
@@ -246,58 +228,28 @@ export class MobileService {
               lte: dayEnd,
             },
           },
-          orderBy: {
-            checkInAt: 'asc',
-          },
+          orderBy: { checkInAt: 'asc' },
         },
       },
-      orderBy: {
-        plannedStart: 'asc',
-      },
+      orderBy: { plannedStart: 'asc' },
     });
 
-    const mobileShifts = shifts.map((shift) =>
-      mapShiftToMobileShift({ shift, staffId, date }),
-    );
-
-    console.log('[MobileService] getTodayShifts from DB', {
-      staffId,
-      date,
-      count: mobileShifts.length,
-    });
-
-    return { shifts: mobileShifts };
+    return {
+      shifts: shifts.map((s) =>
+        mapShiftToMobileShift({ shift: s, staffId, date }),
+      ),
+    };
   }
 
-  /**
-   * Nhận Daily Note từ mobile (hiện tại vẫn mock – chỉ log ra console)
-   * TODO: sau này lưu sang bảng DailyNote riêng (DOCX/PDF...)
-   */
-  submitDailyNote(payload: MobileDailyNotePayload): {
-    status: 'OK';
-    id: string;
-  } {
+  submitDailyNote(payload: MobileDailyNotePayload) {
     const id = `DN_${Date.now()}`;
-
-    console.log('[MobileService] submitDailyNote payload:', payload);
-    console.log('[MobileService] -> mock DailyNote id:', id);
-
+    console.log('[MobileService] DAILY NOTE:', payload);
     return { status: 'OK', id };
   }
 
-  /**
-   * Check in – tạo Visit record trong DB
-   * - Nếu có ScheduleShift tương ứng → gắn scheduleShiftId/individualId/serviceId
-   * - Cập nhật ScheduleShift.status = IN_PROGRESS + actualDspId nếu chưa có
-   */
-  async checkInShift(
-    shiftId: string,
-    staffId: string,
-    clientTime?: string,
-  ): Promise<CheckInOutResponse> {
+  async checkInShift(shiftId: string, staffId: string, clientTime?: string) {
     const checkInAt = clientTime ? new Date(clientTime) : new Date();
 
-    // Lấy thông tin shift để biết individual/service
     const shift = await this.prisma.scheduleShift.findUnique({
       where: { id: shiftId },
       select: {
@@ -305,33 +257,20 @@ export class MobileService {
         individualId: true,
         serviceId: true,
         actualDspId: true,
-        status: true,
       },
     });
-
-    if (!shift) {
-      // Trong thực tế nên throw HttpException, tạm log cho đơn giản
-      console.error('[MobileService] checkInShift: shift not found', {
-        shiftId,
-        staffId,
-      });
-    }
-
-    const individualId = shift?.individualId ?? '';
-    const serviceId = shift?.serviceId ?? null;
 
     const visit = await this.prisma.visit.create({
       data: {
         scheduleShiftId: shiftId,
-        individualId,
+        individualId: shift?.individualId ?? '',
         dspId: staffId,
-        serviceId,
+        serviceId: shift?.serviceId ?? null,
         checkInAt,
         source: VisitSource.MOBILE,
       },
     });
 
-    // Cập nhật status ca trực
     if (shift) {
       await this.prisma.scheduleShift.update({
         where: { id: shiftId },
@@ -342,37 +281,19 @@ export class MobileService {
       });
     }
 
-    console.log('[MobileService] CHECK IN (DB):', {
-      visitId: visit.id,
-      shiftId,
-      staffId,
-      checkInAt: visit.checkInAt,
-    });
-
     return {
       status: 'OK',
       mode: 'IN',
       shiftId,
       staffId,
-      time: visit.checkInAt.toISOString(),
+      time: checkInAt.toISOString(),
       timesheetId: visit.id,
     };
   }
 
-  /**
-   * Check out – cập nhật Visit record trong DB
-   * - Tìm Visit gần nhất chưa có checkOutAt cho shift + staff
-   * - Nếu không thấy thì tạo Visit mới với checkInAt = checkOutAt
-   * - Cập nhật ScheduleShift.status = COMPLETED (tạm thời)
-   */
-  async checkOutShift(
-    shiftId: string,
-    staffId: string,
-    clientTime?: string,
-  ): Promise<CheckInOutResponse> {
+  async checkOutShift(shiftId: string, staffId: string, clientTime?: string) {
     const checkOutAt = clientTime ? new Date(clientTime) : new Date();
 
-    // Lấy shift để lấy info
     const shift = await this.prisma.scheduleShift.findUnique({
       where: { id: shiftId },
       select: {
@@ -383,37 +304,23 @@ export class MobileService {
       },
     });
 
-    const individualId = shift?.individualId ?? '';
-    const serviceId = shift?.serviceId ?? null;
-
-    // Tìm visit open (chưa check out)
     let visit = await this.prisma.visit.findFirst({
-      where: {
-        scheduleShiftId: shiftId,
-        dspId: staffId,
-        checkOutAt: null,
-      },
-      orderBy: {
-        checkInAt: 'desc',
-      },
+      where: { scheduleShiftId: shiftId, dspId: staffId, checkOutAt: null },
+      orderBy: { checkInAt: 'desc' },
     });
 
     if (visit) {
-      // Cập nhật checkOutAt cho visit hiện có
       visit = await this.prisma.visit.update({
         where: { id: visit.id },
-        data: {
-          checkOutAt,
-        },
+        data: { checkOutAt },
       });
     } else {
-      // Không tìm được visit open -> tạo visit mới (in/out cùng lúc)
       visit = await this.prisma.visit.create({
         data: {
           scheduleShiftId: shiftId,
-          individualId,
+          individualId: shift?.individualId ?? '',
           dspId: staffId,
-          serviceId,
+          serviceId: shift?.serviceId ?? null,
           checkInAt: checkOutAt,
           checkOutAt,
           source: VisitSource.MOBILE,
@@ -421,23 +328,12 @@ export class MobileService {
       });
     }
 
-    // Cập nhật status ca trực -> COMPLETED (tạm, sau này có thể tinh chỉnh thêm NOT_COMPLETED...)
-    if (shift) {
-      await this.prisma.scheduleShift.update({
-        where: { id: shiftId },
-        data: {
-          status: ScheduleStatus.COMPLETED,
-          actualDspId: shift.actualDspId ?? staffId,
-        },
-      });
-    }
-
-    console.log('[MobileService] CHECK OUT (DB):', {
-      visitId: visit.id,
-      shiftId,
-      staffId,
-      checkInAt: visit.checkInAt,
-      checkOutAt: visit.checkOutAt,
+    await this.prisma.scheduleShift.update({
+      where: { id: shiftId },
+      data: {
+        status: ScheduleStatus.COMPLETED,
+        actualDspId: shift?.actualDspId ?? staffId,
+      },
     });
 
     return {
@@ -445,7 +341,7 @@ export class MobileService {
       mode: 'OUT',
       shiftId,
       staffId,
-      time: (visit.checkOutAt ?? visit.checkInAt).toISOString(),
+      time: checkOutAt.toISOString(),
       timesheetId: visit.id,
     };
   }
