@@ -194,6 +194,9 @@ model Employee {
 
   // Supervisors cho Admin Users
   userSupervisors UserSupervisor[]
+
+  isMobileUser Boolean @default(false)  // 👈 THÊM DÒNG NÀY
+
 }
 
 /**
@@ -747,3 +750,17 @@ model MedicationIncident {
   @@index([severity])
   @@index([status])
 }
+model MobileLoginOtp {
+  id        String   @id @default(cuid())
+  email     String
+  code      String
+  staffId   String
+  staffName String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([email])
+  @@index([email, code])
+}
+

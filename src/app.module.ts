@@ -2,13 +2,15 @@
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { PrismaModule } from './prisma/prisma.module';
 import { MobileModule } from './mobile/mobile.module';
-import { PrismaModule } from './prisma/prisma.module'; // 👈 thêm dòng này
+import { MobileAuthModule } from './mobile/mobile-auth/mobile-auth.module'; // 👈 ĐÚNG theo path thật
 
 @Module({
   imports: [
-    PrismaModule, // 👈 và thêm PrismaModule vào đây
+    PrismaModule,
     MobileModule,
+    MobileAuthModule, // 👈 module OTP
   ],
   controllers: [AppController],
   providers: [AppService],
