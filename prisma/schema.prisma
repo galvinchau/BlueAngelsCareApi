@@ -196,7 +196,6 @@ model Employee {
   userSupervisors UserSupervisor[]
 
   isMobileUser Boolean @default(false)  // 👈 THÊM DÒNG NÀY
-
 }
 
 /**
@@ -476,6 +475,53 @@ model Visit {
 }
 
 // =====================================================
+//  DAILY NOTE (mới – chỉ lưu scalar ID + cache)
+// =====================================================
+
+model DailyNote {
+  id String @id @default(cuid())
+
+  // Liên kết
+  shiftId      String
+  visitId      String?
+  individualId String
+  staffId      String
+  serviceId    String?
+
+  // Ngày cung cấp dịch vụ (Daily Note)
+  date DateTime
+
+  // Thông tin cache để show ở Reports cho nhanh
+  individualName String
+  staffName      String?
+  serviceCode    String
+  serviceName    String
+  scheduleStart  String
+  scheduleEnd    String
+  visitStart     String?
+  visitEnd       String?
+
+  // Mileage / cancel
+  mileage      Float?
+  isCanceled   Boolean @default(false)
+  cancelReason String?
+
+  // Toàn bộ payload Daily Note (bao gồm notes, meals, signatures...)
+  payload Json
+
+  // Sau này Phase DOC/PDF sẽ dùng 2 field này
+  staffReportFileId      String? // file trên REPORTS-STAFT
+  individualReportFileId String? // file trên REPORTS-INDIVIDUAL
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([date])
+  @@index([individualId, date])
+  @@index([staffId, date])
+}
+
+// =====================================================
 //  ISP ALLOCATION (Hợp đồng ISP – units được cấp)
 // =====================================================
 
@@ -750,6 +796,7 @@ model MedicationIncident {
   @@index([severity])
   @@index([status])
 }
+
 model MobileLoginOtp {
   id        String   @id @default(cuid())
   email     String
@@ -763,4 +810,3 @@ model MobileLoginOtp {
   @@index([email])
   @@index([email, code])
 }
-
