@@ -5,18 +5,17 @@ import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
 import { MobileModule } from './mobile/mobile.module';
 import { MobileAuthModule } from './mobile/mobile-auth/mobile-auth.module';
-
-// ✅ Reports module (Phase 1)
 import { ReportsModule } from './reports/reports.module';
 
+// ✅ ADD
+import { HealthController } from './health/health.controller';
+
 @Module({
-  imports: [
-    PrismaModule,
-    MobileModule,
-    MobileAuthModule,
-    ReportsModule, // ✅ enable /reports/daily-notes endpoint
+  imports: [PrismaModule, MobileModule, MobileAuthModule, ReportsModule],
+  controllers: [
+    AppController,
+    HealthController, // ✅ ADD
   ],
-  controllers: [AppController],
   providers: [AppService],
 })
 export class AppModule {}
