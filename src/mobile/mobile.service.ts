@@ -3,7 +3,7 @@
 //  - Timezone: America/New_York (Altoona, PA)
 //  - Lưu Daily Note vào bảng DailyNote
 //  - Phase 1: Xem Daily Note trong Reports (Web)
-//  - (Optional) Google Drive export is gated by env ENABLE_GOOGLE_REPORTS=1
+//  - Google Drive export is gated by env ENABLE_GOOGLE_REPORTS=1
 // ======================================================
 
 import { Injectable } from '@nestjs/common';
@@ -20,12 +20,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { GoogleReportsService } from '../reports/google-reports.service';
 
 /**
- * Loại trạng thái ca trực trên mobile
+ * Mobile shift status
  */
 export type ShiftStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED';
 
 /**
- * Dữ liệu ca trực trả về cho mobile
+ * Mobile shift DTO
  */
 export interface MobileShift {
   id: string;
@@ -47,7 +47,7 @@ export interface MobileShift {
 }
 
 /**
- * Payload Daily Note gửi từ mobile lên
+ * Payload from mobile
  */
 export interface MobileDailyNotePayload {
   shiftId: string;
@@ -87,7 +87,6 @@ export interface MobileDailyNotePayload {
   staffName?: string;
   certifyText?: string;
 
-  // Mileage trên mobile (nếu có)
   mileage?: number;
 }
 
@@ -102,18 +101,20 @@ export interface CheckInOutResponse {
   timesheetId: string;
 }
 
+const TZ = 'America/New_York';
+
 /**
- * Format giờ HH:mm theo local time (đã convert về America/New_York trước khi gọi)
+ * IMPORTANT:
+ * Never use JS Date.getHours()/getMinutes() because it depends on server timezone.
+ * Always format using Luxon with explicit time zone (America/New_York).
  */
-function formatTimeHHmm(dt: Date | null | undefined): string | null {
+function formatTimeHHmmInTZ(dt: Date | null | undefined): string | null {
   if (!dt) return null;
-  const hh = dt.getHours().toString().padStart(2, '0');
-  const mm = dt.getMinutes().toString().padStart(2, '0');
-  return `${hh}:${mm}`;
+  return DateTime.fromJSDate(dt, { zone: 'utc' }).setZone(TZ).toFormat('HH:mm');
 }
 
 /**
- * Helper: format địa chỉ
+ * Helper: format address
  */
 function formatAddress(ind: Individual): string {
   const parts = [
@@ -129,13 +130,6 @@ function formatAddress(ind: Individual): string {
 }
 
 /**
- * Helper: convert Date (UTC) -> Date (America/New_York)
- */
-function toLocalDate(dt: Date): Date {
-  return DateTime.fromJSDate(dt).setZone('America/New_York').toJSDate();
-}
-
-/**
  * Helper: map ScheduleShift -> MobileShift
  */
 function mapShiftToMobileShift(params: {
@@ -145,7 +139,7 @@ function mapShiftToMobileShift(params: {
     visits: Visit[];
   };
   staffId: string;
-  date: string; // YYYY-MM-DD (theo America/New_York)
+  date: string; // YYYY-MM-DD (America/New_York)
 }): MobileShift {
   const { shift, staffId, date } = params;
   const individual = shift.individual;
@@ -164,11 +158,11 @@ function mapShiftToMobileShift(params: {
       break;
   }
 
-  // Visit theo DSP & theo đúng ngày local (America/New_York)
+  // Visits for DSP on the same local day (America/New_York)
   const visitsForDsp = visits.filter((v) => {
     if (v.dspId !== staffId || !v.checkInAt) return false;
     const localDateStr = DateTime.fromJSDate(v.checkInAt)
-      .setZone('America/New_York')
+      .setZone(TZ)
       .toISODate();
     return localDateStr === date;
   });
@@ -188,18 +182,17 @@ function mapShiftToMobileShift(params: {
       return vEnd > maxEnd ? v : max;
     });
 
-    const earliestLocal = toLocalDate(earliest.checkInAt);
-    const latestLocal = toLocalDate(latest.checkOutAt ?? latest.checkInAt);
-
-    visitStart = formatTimeHHmm(earliestLocal);
-    visitEnd = formatTimeHHmm(latestLocal);
+    // Format times in America/New_York (stable on any server timezone)
+    visitStart = formatTimeHHmmInTZ(earliest.checkInAt);
+    visitEnd = formatTimeHHmmInTZ(latest.checkOutAt ?? latest.checkInAt);
 
     if (visitsForDsp.some((v) => !v.checkOutAt)) status = 'IN_PROGRESS';
     else status = 'COMPLETED';
   }
 
-  const plannedStartLocal = toLocalDate(shift.plannedStart);
-  const plannedEndLocal = toLocalDate(shift.plannedEnd);
+  // Planned start/end format in America/New_York
+  const scheduleStart = formatTimeHHmmInTZ(shift.plannedStart) ?? '';
+  const scheduleEnd = formatTimeHHmmInTZ(shift.plannedEnd) ?? '';
 
   return {
     id: shift.id,
@@ -212,8 +205,8 @@ function mapShiftToMobileShift(params: {
     serviceCode: service.serviceCode,
     serviceName: service.serviceName,
     location: individual.location ?? '',
-    scheduleStart: formatTimeHHmm(plannedStartLocal) ?? '',
-    scheduleEnd: formatTimeHHmm(plannedEndLocal) ?? '',
+    scheduleStart,
+    scheduleEnd,
     status,
     visitStart,
     visitEnd,
@@ -229,16 +222,16 @@ export class MobileService {
   ) {}
 
   // =====================================================
-  // Lấy ca trực hôm nay cho mobile
+  // Today shifts for mobile
   // =====================================================
   async getTodayShifts(
     staffId: string,
     date: string,
   ): Promise<{ shifts: MobileShift[] }> {
-    const dayStartLocal = DateTime.fromISO(date, { zone: 'America/New_York' })
+    const dayStartLocal = DateTime.fromISO(date, { zone: TZ })
       .startOf('day')
       .toJSDate();
-    const dayEndLocal = DateTime.fromISO(date, { zone: 'America/New_York' })
+    const dayEndLocal = DateTime.fromISO(date, { zone: TZ })
       .endOf('day')
       .toJSDate();
 
@@ -269,8 +262,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // Lưu Daily Note từ mobile vào bảng DailyNote
-  // Phase 1: Web Reports đọc từ DB
+  // Save Daily Note from mobile
   // =====================================================
   async submitDailyNote(payload: MobileDailyNotePayload) {
     const {
@@ -279,7 +271,6 @@ export class MobileService {
       individualId,
       date,
       serviceCode,
-      serviceName,
       scheduleStart,
       scheduleEnd,
       visitStart,
@@ -288,7 +279,7 @@ export class MobileService {
       mileage,
     } = payload;
 
-    const serviceDate = DateTime.fromISO(date, { zone: 'America/New_York' })
+    const serviceDate = DateTime.fromISO(date, { zone: TZ })
       .startOf('day')
       .toJSDate();
 
@@ -315,7 +306,7 @@ export class MobileService {
         individualName: payload.individualName,
         staffName: staffName ?? null,
         serviceCode,
-        serviceName,
+        serviceName: payload.serviceName,
         scheduleStart,
         scheduleEnd,
         visitStart: visitStart ?? null,
@@ -327,25 +318,40 @@ export class MobileService {
 
         payload: payload as unknown as object,
 
+        // legacy fields
         staffReportFileId: null,
         individualReportFileId: null,
-      },
+
+        // new fields (important for Web Reports)
+        staffReportDocFileId: null,
+        staffReportPdfFileId: null,
+        individualReportDocFileId: null,
+        individualReportPdfFileId: null,
+      } as any,
     });
 
-    // 2) Optional: Google export (disabled by default)
+    // 2) Google export
     const enableGoogle = process.env.ENABLE_GOOGLE_REPORTS === '1';
     if (enableGoogle) {
       try {
         const { staff, individual } =
           await this.reportsService.generateDailyNoteDocs(record.id, payload);
 
+        // Save BOTH doc+pdf IDs so Web Reports can show links
         await this.prisma.dailyNote.update({
           where: { id: record.id },
           data: {
-            staffReportFileId: staff.pdfId ?? staff.docId ?? null,
+            // new fields
+            staffReportDocFileId: staff?.docId ?? null,
+            staffReportPdfFileId: staff?.pdfId ?? null,
+            individualReportDocFileId: individual?.docId ?? null,
+            individualReportPdfFileId: individual?.pdfId ?? null,
+
+            // legacy fields (keep for compatibility; prefer pdf)
+            staffReportFileId: staff?.pdfId ?? staff?.docId ?? null,
             individualReportFileId:
-              individual.pdfId ?? individual.docId ?? null,
-          },
+              individual?.pdfId ?? individual?.docId ?? null,
+          } as any,
         });
       } catch (err) {
         console.error(
@@ -359,16 +365,17 @@ export class MobileService {
   }
 
   // =====================================================
-  // Check-in ca trực
+  // Check-in
   // =====================================================
   async checkInShift(
     shiftId: string,
     staffId: string,
     clientTime?: string,
   ): Promise<CheckInOutResponse> {
+    // clientTime is ISO (usually with Z). Parse as actual instant, then keep JS Date in UTC.
     const checkInAt = clientTime
-      ? DateTime.fromISO(clientTime, { zone: 'America/New_York' }).toJSDate()
-      : DateTime.now().setZone('America/New_York').toJSDate();
+      ? DateTime.fromISO(clientTime, { setZone: true }).setZone(TZ).toJSDate()
+      : DateTime.now().setZone(TZ).toJSDate();
 
     const shift = await this.prisma.scheduleShift.findUnique({
       where: { id: shiftId },
@@ -412,7 +419,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // Check-out ca trực
+  // Check-out
   // =====================================================
   async checkOutShift(
     shiftId: string,
@@ -420,8 +427,8 @@ export class MobileService {
     clientTime?: string,
   ): Promise<CheckInOutResponse> {
     const checkOutAt = clientTime
-      ? DateTime.fromISO(clientTime, { zone: 'America/New_York' }).toJSDate()
-      : DateTime.now().setZone('America/New_York').toJSDate();
+      ? DateTime.fromISO(clientTime, { setZone: true }).setZone(TZ).toJSDate()
+      : DateTime.now().setZone(TZ).toJSDate();
 
     const shift = await this.prisma.scheduleShift.findUnique({
       where: { id: shiftId },
