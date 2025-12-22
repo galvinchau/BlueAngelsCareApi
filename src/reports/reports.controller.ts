@@ -1,12 +1,12 @@
 // src/reports/reports.controller.ts
 import {
+  BadRequestException,
   Controller,
   Get,
+  NotFoundException,
   Param,
   Query,
   Res,
-  NotFoundException,
-  BadRequestException,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import * as fs from 'fs';
@@ -41,6 +41,7 @@ export class ReportsController {
   }
 
   /**
+   * Detail for preview page
    * GET /reports/daily-notes/:id
    */
   @Get('daily-notes/:id')
@@ -53,13 +54,14 @@ export class ReportsController {
   /**
    * Direct download DOC/PDF (no Google Drive)
    * GET /reports/daily-notes/:id/download/:type
+   * Optional: ?regen=1 to force regenerate DOCX (PDF always regenerates)
    */
   @Get('daily-notes/:id/download/:type')
   async downloadDailyNoteReport(
     @Param('id') id: string,
     @Param('type') type: DownloadType,
-    @Res() res: Response, // required param
-    @Query('regen') regen?: string, // optional: ?regen=1
+    @Res() res: Response,
+    @Query('regen') regen?: string,
   ) {
     const allowed: DownloadType[] = [
       'staff-doc',
@@ -86,8 +88,7 @@ export class ReportsController {
       contentType =
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       ext = 'docx';
-      filePath = dn.staffReportDocPath;
-
+      filePath = dn.staffReportDocPath ?? null;
       if (forceRegen || !filePath) {
         filePath = await this.fileReportsService.generateStaffDocx(id);
       }
@@ -97,14 +98,16 @@ export class ReportsController {
       contentType =
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       ext = 'docx';
-      filePath = dn.individualReportDocPath;
-
+      filePath = dn.individualReportDocPath ?? null;
       if (forceRegen || !filePath) {
         filePath = await this.fileReportsService.generateIndividualDocx(id);
       }
     }
 
-    // PDF (always regenerate to avoid stale fallback PDFs)
+    /**
+     * ✅ IMPORTANT:
+     * PDF: ALWAYS regenerate to avoid serving old fallback pdf created before LibreOffice was available.
+     */
     if (type === 'staff-pdf') {
       contentType = 'application/pdf';
       ext = 'pdf';
@@ -137,7 +140,8 @@ export class ReportsController {
     }
 
     // Filename: YYYY-MM-DD - Individual - Service - DSP.ext
-    const date = new Date(dn.date).toISOString().slice(0, 10);
+    const date =
+      dn.date instanceof Date ? dn.date.toISOString().slice(0, 10) : '';
     const individual = sanitizeName(dn.individualName || 'Individual');
     const service = sanitizeName(dn.serviceName || 'Service');
     const dsp = sanitizeName(dn.staffName || 'DSP');
@@ -150,13 +154,12 @@ export class ReportsController {
       `attachment; filename="${downloadName}"`,
     );
 
-    const stream = fs.createReadStream(absPath);
-    stream.pipe(res);
+    fs.createReadStream(absPath).pipe(res);
   }
 }
 
 function sanitizeName(input: string) {
-  return input
+  return String(input ?? '')
     .replace(/[\\\/:*?"<>|]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
