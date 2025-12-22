@@ -1,128 +1,170 @@
 // src/reports/reports.service.ts
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
-import { DateTime } from 'luxon';
 import { PrismaService } from '../prisma/prisma.service';
+import { DateTime } from 'luxon';
 
-export interface DailyNotesFilter {
+const TZ = 'America/New_York';
+
+export type DailyNotesFilter = {
   from?: string;
   to?: string;
   staffId?: string;
   individualId?: string;
-}
-
-export type DailyNoteReportItem = {
-  id: string;
-  date: Date;
-
-  individualId: string;
-  individualName?: string | null;
-
-  staffId: string;
-  staffName?: string | null;
-
-  serviceCode?: string | null;
-  serviceName?: string | null;
-
-  scheduleStart?: string | null;
-  scheduleEnd?: string | null;
-
-  visitStart?: string | null;
-  visitEnd?: string | null;
-
-  mileage?: number | null;
-  isCanceled?: boolean | null;
-  cancelReason?: string | null;
-
-  // legacy (existing)
-  staffReportFileId?: string | null;
-  individualReportFileId?: string | null;
-
-  // new (for UI DOC|PDF)
-  staffReportDocFileId: string | null;
-  staffReportPdfFileId: string | null;
-  individualReportDocFileId: string | null;
-  individualReportPdfFileId: string | null;
 };
 
 @Injectable()
 export class ReportsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async getDailyNotes(
-    filter: DailyNotesFilter,
-  ): Promise<DailyNoteReportItem[]> {
-    const where: Prisma.DailyNoteWhereInput = {};
+  private toLocalISODate(d: Date): string {
+    return (
+      DateTime.fromJSDate(d, { zone: 'utc' }).setZone(TZ).toISODate() ?? ''
+    );
+  }
 
+  private normalizeDateInput(v?: string): string | undefined {
+    // Expect YYYY-MM-DD from UI; accept empty
+    if (!v) return undefined;
+    const s = String(v).trim();
+    if (!s) return undefined;
+    return s;
+  }
+
+  async getDailyNotes(filter: DailyNotesFilter) {
+    const from = this.normalizeDateInput(filter.from);
+    const to = this.normalizeDateInput(filter.to);
+
+    // Use date range on dn.date (stored as Date)
+    // We interpret from/to as local dates in America/New_York and convert to UTC bounds.
+    let gte: Date | undefined;
+    let lt: Date | undefined;
+
+    if (from) {
+      const startLocal = DateTime.fromISO(from, { zone: TZ }).startOf('day');
+      gte = startLocal.toUTC().toJSDate();
+    }
+
+    if (to) {
+      const endLocalExclusive = DateTime.fromISO(to, { zone: TZ })
+        .plus({ days: 1 })
+        .startOf('day');
+      lt = endLocalExclusive.toUTC().toJSDate();
+    }
+
+    const where: any = {};
+    if (gte || lt)
+      where.date = { ...(gte ? { gte } : {}), ...(lt ? { lt } : {}) };
     if (filter.staffId) where.staffId = filter.staffId;
     if (filter.individualId) where.individualId = filter.individualId;
 
-    if (filter.from || filter.to) {
-      const dateCond: Prisma.DateTimeFilter = {};
-
-      if (filter.from) {
-        dateCond.gte = DateTime.fromISO(filter.from, {
-          zone: 'America/New_York',
-        })
-          .startOf('day')
-          .toJSDate();
-      }
-
-      if (filter.to) {
-        dateCond.lte = DateTime.fromISO(filter.to, { zone: 'America/New_York' })
-          .endOf('day')
-          .toJSDate();
-      }
-
-      where.date = dateCond;
-    }
-
-    // IMPORTANT: select only lightweight fields (NO payload/signatures)
-    const rows = await this.prisma.dailyNote.findMany({
+    const items = await this.prisma.dailyNote.findMany({
       where,
-      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+      orderBy: { date: 'desc' },
       select: {
         id: true,
         date: true,
-
-        individualId: true,
-        individualName: true,
-
         staffId: true,
         staffName: true,
-
+        individualId: true,
+        individualName: true,
         serviceCode: true,
         serviceName: true,
-
         scheduleStart: true,
         scheduleEnd: true,
-
         visitStart: true,
         visitEnd: true,
-
         mileage: true,
         isCanceled: true,
         cancelReason: true,
 
-        staffReportFileId: true,
-        individualReportFileId: true,
+        // file paths (may be null)
+        staffReportDocPath: true,
+        staffReportPdfPath: true,
+        individualReportDocPath: true,
+        individualReportPdfPath: true,
       },
     });
 
-    return rows.map((n) => {
-      const legacyStaff = n.staffReportFileId ?? null;
-      const legacyInd = n.individualReportFileId ?? null;
+    // keep API response stable for web UI
+    return items.map((x) => ({
+      ...x,
+      dateLocal: x.date ? this.toLocalISODate(x.date) : '',
+    }));
+  }
 
-      return {
-        ...n,
+  /**
+   * Detail used by Web preview page
+   * GET /reports/daily-notes/:id
+   */
+  async getDailyNoteDetail(id: string) {
+    const dn = await this.prisma.dailyNote.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        date: true,
+        staffId: true,
+        staffName: true,
+        individualId: true,
+        individualName: true,
+        serviceCode: true,
+        serviceName: true,
+        scheduleStart: true,
+        scheduleEnd: true,
+        visitStart: true,
+        visitEnd: true,
+        mileage: true,
+        isCanceled: true,
+        cancelReason: true,
+        payload: true,
 
-        // new fields (UI will use these)
-        staffReportDocFileId: null,
-        staffReportPdfFileId: legacyStaff,
-
-        individualReportDocFileId: null,
-        individualReportPdfFileId: legacyInd,
-      };
+        staffReportDocPath: true,
+        staffReportPdfPath: true,
+        individualReportDocPath: true,
+        individualReportPdfPath: true,
+      },
     });
+
+    if (!dn) return null;
+
+    return {
+      ...dn,
+      dateLocal: dn.date ? this.toLocalISODate(dn.date) : '',
+    };
+  }
+
+  /**
+   * Minimal payload for download generation/filename
+   * used by ReportsController download endpoint
+   */
+  async getDailyNoteForDownload(id: string) {
+    const dn = await this.prisma.dailyNote.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        date: true,
+        staffId: true,
+        staffName: true,
+        individualId: true,
+        individualName: true,
+        serviceCode: true,
+        serviceName: true,
+        scheduleStart: true,
+        scheduleEnd: true,
+        visitStart: true,
+        visitEnd: true,
+        mileage: true,
+        isCanceled: true,
+        cancelReason: true,
+        payload: true,
+
+        staffReportDocPath: true,
+        staffReportPdfPath: true,
+        individualReportDocPath: true,
+        individualReportPdfPath: true,
+      },
+    });
+
+    if (!dn) return null;
+    return dn;
   }
 }
