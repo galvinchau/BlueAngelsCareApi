@@ -113,6 +113,8 @@ export class FileReportsService {
       LostMinutes: this.safeStr(payload.lostMinutes || ''),
       LostUnits: this.safeStr(payload.lostUnits || ''),
       UnderHours: this.safeStr(payload.underHours || ''),
+      // ✅ some templates use OverHours
+      OverHours: this.safeStr(payload.overHours || payload.OverHours || ''),
       OverReason: this.safeStr(payload.overReason || ''),
       CancelReason: this.safeStr(dn.cancelReason || payload.cancelReason || ''),
       ShortReason: this.safeStr(payload.shortReason || ''),
@@ -226,6 +228,32 @@ export class FileReportsService {
     return filePath;
   }
 
+  /**
+   * ✅ Resolve LibreOffice soffice command robustly (Windows-friendly)
+   * Priority:
+   * 1) process.env.SOFFICE_PATH
+   * 2) common Windows install paths
+   * 3) "soffice" (PATH) as a last resort (Linux/mac or if user added PATH)
+   */
+  private resolveSofficeCommand(): string {
+    const envPath =
+      process.env.SOFFICE_PATH ||
+      process.env.LIBREOFFICE_PATH ||
+      process.env.LIBRE_OFFICE_PATH;
+
+    if (envPath && fs.existsSync(envPath)) return envPath;
+
+    const winCandidates = [
+      'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+      'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
+    ];
+    for (const p of winCandidates) {
+      if (fs.existsSync(p)) return p;
+    }
+
+    return 'soffice';
+  }
+
   private async tryConvertDocxToPdf(
     docxPath: string,
     outDir: string,
@@ -235,8 +263,10 @@ export class FileReportsService {
       path.basename(docxPath, path.extname(docxPath)) + '.pdf',
     );
 
+    const soffice = this.resolveSofficeCommand();
+
     return new Promise((resolve) => {
-      const proc = spawn('soffice', [
+      const proc = spawn(soffice, [
         '--headless',
         '--nologo',
         '--nofirststartwizard',
@@ -247,10 +277,21 @@ export class FileReportsService {
         docxPath,
       ]);
 
-      proc.on('error', () => resolve(null));
+      proc.on('error', (err) => {
+        console.error('[PDF] LibreOffice spawn error:', err);
+        console.error('[PDF] soffice command used:', soffice);
+        resolve(null);
+      });
+
       proc.on('exit', async (code) => {
-        if (code === 0 && (await fs.pathExists(outPdf))) resolve(outPdf);
-        else resolve(null);
+        if (code === 0 && (await fs.pathExists(outPdf))) {
+          resolve(outPdf);
+        } else {
+          console.error('[PDF] LibreOffice convert failed. exit code:', code);
+          console.error('[PDF] soffice command used:', soffice);
+          console.error('[PDF] expected pdf path:', outPdf);
+          resolve(null);
+        }
       });
     });
   }
@@ -311,18 +352,21 @@ export class FileReportsService {
 
       const converted = await this.tryConvertDocxToPdf(docxPath, baseDir);
       if (converted) {
-        await fs.copy(converted, filePath, { overwrite: true });
+        // ✅ avoid copying a file onto itself
+        if (path.resolve(converted) !== path.resolve(filePath)) {
+          await fs.copy(converted, filePath, { overwrite: true });
+        }
       } else {
         const buf = await this.generateFallbackPdf(
           dn,
-          'DAILY NOTE – STAFF REPORT',
+          'SERVICE NOTE – STAFF REPORT',
         );
         await fs.writeFile(filePath, buf);
       }
     } catch (e) {
       const buf = await this.generateFallbackPdf(
         dn,
-        'DAILY NOTE – STAFF REPORT',
+        'SERVICE NOTE – STAFF REPORT',
       );
       await fs.writeFile(filePath, buf);
     }
@@ -352,18 +396,20 @@ export class FileReportsService {
 
       const converted = await this.tryConvertDocxToPdf(docxPath, baseDir);
       if (converted) {
-        await fs.copy(converted, filePath, { overwrite: true });
+        if (path.resolve(converted) !== path.resolve(filePath)) {
+          await fs.copy(converted, filePath, { overwrite: true });
+        }
       } else {
         const buf = await this.generateFallbackPdf(
           dn,
-          'DAILY NOTE – INDIVIDUAL REPORT',
+          'SERVICE NOTE – INDIVIDUAL REPORT',
         );
         await fs.writeFile(filePath, buf);
       }
     } catch (e) {
       const buf = await this.generateFallbackPdf(
         dn,
-        'DAILY NOTE – INDIVIDUAL REPORT',
+        'SERVICE NOTE – INDIVIDUAL REPORT',
       );
       await fs.writeFile(filePath, buf);
     }
