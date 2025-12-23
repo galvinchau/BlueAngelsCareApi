@@ -26,6 +26,7 @@
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",
     "@prisma/client": "^6.18.0",
+    "cloudconvert": "^3.0.0",
     "docx": "^9.5.1",
     "docxtemplater": "^3.67.6",
     "fs-extra": "^11.3.2",
