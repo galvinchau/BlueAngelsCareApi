@@ -513,6 +513,12 @@ model DailyNote {
   staffReportFileId      String? // file trên REPORTS-STAFT
   individualReportFileId String? // file trên REPORTS-INDIVIDUAL
 
+  // NEW: direct-download report paths (saved on server filesystem)
+  staffReportDocPath      String?
+  staffReportPdfPath      String?
+  individualReportDocPath String?
+  individualReportPdfPath String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

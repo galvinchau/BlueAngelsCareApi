@@ -64,3 +64,6 @@ google-service-account.json
 .env
 .env.*
 
+
+uploads/
+
