@@ -1,12 +1,12 @@
 // src/reports/reports.controller.ts
 import {
-  BadRequestException,
   Controller,
   Get,
-  NotFoundException,
   Param,
   Query,
   Res,
+  NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import * as fs from 'fs';
@@ -41,7 +41,6 @@ export class ReportsController {
   }
 
   /**
-   * Detail for preview page
    * GET /reports/daily-notes/:id
    */
   @Get('daily-notes/:id')
@@ -54,7 +53,6 @@ export class ReportsController {
   /**
    * Direct download DOC/PDF (no Google Drive)
    * GET /reports/daily-notes/:id/download/:type
-   * Optional: ?regen=1 to force regenerate DOCX (PDF always regenerates)
    */
   @Get('daily-notes/:id/download/:type')
   async downloadDailyNoteReport(
@@ -79,16 +77,36 @@ export class ReportsController {
     const forceRegen =
       regen === '1' || regen === 'true' || regen === 'yes' ? true : false;
 
+    // normalize & security root
+    const uploadsRoot = path.resolve(process.cwd(), 'uploads');
+
+    const isWindowsAbsPath = (p: string) => /^[a-zA-Z]:[\\/]/.test(p);
+
+    const isSafeUploadsPath = (p: string) => {
+      if (!p) return false;
+      // reject obvious Windows path on Linux/Render (or mixed env)
+      if (isWindowsAbsPath(p)) return false;
+
+      const abs = path.resolve(p);
+      return abs === uploadsRoot || abs.startsWith(uploadsRoot + path.sep);
+    };
+
+    // pick path + maybe auto-generate
     let filePath: string | null = null;
     let contentType = 'application/octet-stream';
     let ext = 'bin';
 
-    // DOCX
+    // DOCX: generate if missing OR invalid OR ?regen=1
     if (type === 'staff-doc') {
       contentType =
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       ext = 'docx';
-      filePath = dn.staffReportDocPath ?? null;
+
+      // If DB path exists but is NOT safe for this server => treat as missing
+      const existing = dn.staffReportDocPath ?? null;
+      const usable = existing && isSafeUploadsPath(existing) ? existing : null;
+
+      filePath = usable;
       if (forceRegen || !filePath) {
         filePath = await this.fileReportsService.generateStaffDocx(id);
       }
@@ -98,15 +116,19 @@ export class ReportsController {
       contentType =
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       ext = 'docx';
-      filePath = dn.individualReportDocPath ?? null;
+
+      const existing = dn.individualReportDocPath ?? null;
+      const usable = existing && isSafeUploadsPath(existing) ? existing : null;
+
+      filePath = usable;
       if (forceRegen || !filePath) {
         filePath = await this.fileReportsService.generateIndividualDocx(id);
       }
     }
 
     /**
-     * ✅ IMPORTANT:
-     * PDF: ALWAYS regenerate to avoid serving old fallback pdf created before LibreOffice was available.
+     * PDF: ALWAYS regenerate
+     * (On Render, if LibreOffice missing => fallback PDF)
      */
     if (type === 'staff-pdf') {
       contentType = 'application/pdf';
@@ -124,24 +146,47 @@ export class ReportsController {
       throw new NotFoundException('Report file path not available yet');
     }
 
-    // Security: only allow serving files inside ./uploads
-    const uploadsRoot = path.resolve(process.cwd(), 'uploads');
+    // final security check (must be under uploads)
     const absPath = path.resolve(filePath);
 
     if (
-      !absPath.startsWith(uploadsRoot + path.sep) &&
-      absPath !== uploadsRoot
+      absPath !== uploadsRoot &&
+      !absPath.startsWith(uploadsRoot + path.sep)
     ) {
       throw new BadRequestException('Invalid file path');
     }
 
     if (!fs.existsSync(absPath)) {
-      throw new NotFoundException('Report file not found on server');
+      // if file missing on disk, try regenerate for doc types once
+      if (type === 'staff-doc') {
+        const regenerated = await this.fileReportsService.generateStaffDocx(id);
+        const regenAbs = path.resolve(regenerated);
+        if (
+          regenAbs === uploadsRoot ||
+          regenAbs.startsWith(uploadsRoot + path.sep)
+        ) {
+          filePath = regenerated;
+        }
+      } else if (type === 'individual-doc') {
+        const regenerated =
+          await this.fileReportsService.generateIndividualDocx(id);
+        const regenAbs = path.resolve(regenerated);
+        if (
+          regenAbs === uploadsRoot ||
+          regenAbs.startsWith(uploadsRoot + path.sep)
+        ) {
+          filePath = regenerated;
+        }
+      }
+
+      const abs2 = path.resolve(filePath);
+      if (!fs.existsSync(abs2)) {
+        throw new NotFoundException('Report file not found on server');
+      }
     }
 
-    // Filename: YYYY-MM-DD - Individual - Service - DSP.ext
-    const date =
-      dn.date instanceof Date ? dn.date.toISOString().slice(0, 10) : '';
+    // build filename: YYYY-MM-DD - Individual - Service - DSP.ext
+    const date = dn.date.toISOString().slice(0, 10);
     const individual = sanitizeName(dn.individualName || 'Individual');
     const service = sanitizeName(dn.serviceName || 'Service');
     const dsp = sanitizeName(dn.staffName || 'DSP');
@@ -154,12 +199,13 @@ export class ReportsController {
       `attachment; filename="${downloadName}"`,
     );
 
-    fs.createReadStream(absPath).pipe(res);
+    const stream = fs.createReadStream(path.resolve(filePath));
+    stream.pipe(res);
   }
 }
 
 function sanitizeName(input: string) {
-  return String(input ?? '')
+  return input
     .replace(/[\\\/:*?"<>|]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
