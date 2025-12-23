@@ -67,3 +67,6 @@ google-service-account.json
 
 uploads/
 
+# allow daily note docx template
+!src/reports/templates/
+!src/reports/templates/*.docx
