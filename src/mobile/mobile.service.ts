@@ -1,9 +1,8 @@
 // ======================================================
 //  src/mobile/mobile.service.ts
 //  - Timezone: America/New_York (Altoona, PA)
-//  - Lưu Daily Note vào bảng DailyNote
-//  - Phase 1: Xem Daily Note trong Reports (Web)
-//  - Google Drive export is gated by env ENABLE_GOOGLE_REPORTS=1
+//  - Save Daily Note into DailyNote table
+//  - Google export is gated by env ENABLE_GOOGLE_REPORTS=1
 // ======================================================
 
 import { Injectable } from '@nestjs/common';
@@ -19,14 +18,8 @@ import { DateTime } from 'luxon';
 import { PrismaService } from '../prisma/prisma.service';
 import { GoogleReportsService } from '../reports/google-reports.service';
 
-/**
- * Mobile shift status
- */
 export type ShiftStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED';
 
-/**
- * Mobile shift DTO
- */
 export interface MobileShift {
   id: string;
   date: string;
@@ -46,9 +39,6 @@ export interface MobileShift {
   outcomeText?: string | null;
 }
 
-/**
- * Payload from mobile
- */
 export interface MobileDailyNotePayload {
   shiftId: string;
   staffId: string;
@@ -88,6 +78,9 @@ export interface MobileDailyNotePayload {
   certifyText?: string;
 
   mileage?: number;
+
+  // Mobile app may send additional fields (signatures, cancel, etc.).
+  // We keep all of them inside payload JSON to avoid schema mismatch issues.
 }
 
 export type CheckMode = 'IN' | 'OUT';
@@ -103,19 +96,11 @@ export interface CheckInOutResponse {
 
 const TZ = 'America/New_York';
 
-/**
- * IMPORTANT:
- * Never use JS Date.getHours()/getMinutes() because it depends on server timezone.
- * Always format using Luxon with explicit time zone (America/New_York).
- */
 function formatTimeHHmmInTZ(dt: Date | null | undefined): string | null {
   if (!dt) return null;
   return DateTime.fromJSDate(dt, { zone: 'utc' }).setZone(TZ).toFormat('HH:mm');
 }
 
-/**
- * Helper: format address
- */
 function formatAddress(ind: Individual): string {
   const parts = [
     ind.address1 ?? '',
@@ -125,13 +110,9 @@ function formatAddress(ind: Individual): string {
   ]
     .map((p) => p?.trim())
     .filter((p) => !!p);
-
   return parts.join(', ');
 }
 
-/**
- * Helper: map ScheduleShift -> MobileShift
- */
 function mapShiftToMobileShift(params: {
   shift: ScheduleShift & {
     individual: Individual;
@@ -146,7 +127,6 @@ function mapShiftToMobileShift(params: {
   const service = shift.service;
   const visits = shift.visits ?? [];
 
-  // Status
   let status: ShiftStatus = 'NOT_STARTED';
   switch (shift.status) {
     case ScheduleStatus.IN_PROGRESS:
@@ -158,7 +138,6 @@ function mapShiftToMobileShift(params: {
       break;
   }
 
-  // Visits for DSP on the same local day (America/New_York)
   const visitsForDsp = visits.filter((v) => {
     if (v.dspId !== staffId || !v.checkInAt) return false;
     const localDateStr = DateTime.fromJSDate(v.checkInAt)
@@ -182,7 +161,6 @@ function mapShiftToMobileShift(params: {
       return vEnd > maxEnd ? v : max;
     });
 
-    // Format times in America/New_York (stable on any server timezone)
     visitStart = formatTimeHHmmInTZ(earliest.checkInAt);
     visitEnd = formatTimeHHmmInTZ(latest.checkOutAt ?? latest.checkInAt);
 
@@ -190,7 +168,6 @@ function mapShiftToMobileShift(params: {
     else status = 'COMPLETED';
   }
 
-  // Planned start/end format in America/New_York
   const scheduleStart = formatTimeHHmmInTZ(shift.plannedStart) ?? '';
   const scheduleEnd = formatTimeHHmmInTZ(shift.plannedEnd) ?? '';
 
@@ -221,9 +198,6 @@ export class MobileService {
     private readonly reportsService: GoogleReportsService,
   ) {}
 
-  // =====================================================
-  // Today shifts for mobile
-  // =====================================================
   async getTodayShifts(
     staffId: string,
     date: string,
@@ -262,7 +236,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // Save Daily Note from mobile
+  // Save Daily Note from mobile (SAFE MODE)
   // =====================================================
   async submitDailyNote(payload: MobileDailyNotePayload) {
     const {
@@ -293,7 +267,16 @@ export class MobileService {
       select: { id: true },
     });
 
-    // 1) Save DailyNote
+    // NOTE: Mobile may send cancel fields even if not in the TS interface.
+    const isCanceled = (payload as any)?.isCanceled === true;
+    const cancelReason =
+      typeof (payload as any)?.cancelReason === 'string'
+        ? String((payload as any).cancelReason).trim()
+        : null;
+
+    // SAFE CREATE:
+    // - Only write core columns that are guaranteed in schema
+    // - Do NOT write any report fields (staffReportDocPath, etc.) to avoid Prisma Client mismatch on Render
     const record = await this.prisma.dailyNote.create({
       data: {
         shiftId,
@@ -313,46 +296,18 @@ export class MobileService {
         visitEnd: visitEnd ?? null,
 
         mileage: typeof mileage === 'number' ? mileage : null,
-        isCanceled: false,
-        cancelReason: null,
+        isCanceled,
+        cancelReason: isCanceled ? cancelReason : null,
 
         payload: payload as unknown as object,
-
-        // legacy fields
-        staffReportFileId: null,
-        individualReportFileId: null,
-
-        // new fields (important for Web Reports)
-        staffReportDocFileId: null,
-        staffReportPdfFileId: null,
-        individualReportDocFileId: null,
-        individualReportPdfFileId: null,
       } as any,
     });
 
-    // 2) Google export
+    // Optional: generate docs (but do NOT update DB report columns here)
     const enableGoogle = process.env.ENABLE_GOOGLE_REPORTS === '1';
     if (enableGoogle) {
       try {
-        const { staff, individual } =
-          await this.reportsService.generateDailyNoteDocs(record.id, payload);
-
-        // Save BOTH doc+pdf IDs so Web Reports can show links
-        await this.prisma.dailyNote.update({
-          where: { id: record.id },
-          data: {
-            // new fields
-            staffReportDocFileId: staff?.docId ?? null,
-            staffReportPdfFileId: staff?.pdfId ?? null,
-            individualReportDocFileId: individual?.docId ?? null,
-            individualReportPdfFileId: individual?.pdfId ?? null,
-
-            // legacy fields (keep for compatibility; prefer pdf)
-            staffReportFileId: staff?.pdfId ?? staff?.docId ?? null,
-            individualReportFileId:
-              individual?.pdfId ?? individual?.docId ?? null,
-          } as any,
-        });
+        await this.reportsService.generateDailyNoteDocs(record.id, payload);
       } catch (err) {
         console.error(
           '[MobileService] Failed to generate Google Docs/PDF',
@@ -364,15 +319,11 @@ export class MobileService {
     return { status: 'OK', id: record.id };
   }
 
-  // =====================================================
-  // Check-in
-  // =====================================================
   async checkInShift(
     shiftId: string,
     staffId: string,
     clientTime?: string,
   ): Promise<CheckInOutResponse> {
-    // clientTime is ISO (usually with Z). Parse as actual instant, then keep JS Date in UTC.
     const checkInAt = clientTime
       ? DateTime.fromISO(clientTime, { setZone: true }).setZone(TZ).toJSDate()
       : DateTime.now().setZone(TZ).toJSDate();
@@ -418,9 +369,6 @@ export class MobileService {
     };
   }
 
-  // =====================================================
-  // Check-out
-  // =====================================================
   async checkOutShift(
     shiftId: string,
     staffId: string,
