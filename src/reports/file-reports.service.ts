@@ -36,7 +36,6 @@ export class FileReportsService {
 
   /**
    * We always store files under: <cwd>/uploads/daily-notes/<YYYY-MM-DD>/dn_<id>/
-   * On Render/Linux: cwd is something like /opt/render/project/src
    */
   private buildBaseDir(dailyNote: { id: string; date: Date }) {
     const localDay = dailyNote.date
@@ -53,45 +52,34 @@ export class FileReportsService {
 
   private isObviouslyWindowsPath(p?: string | null): boolean {
     if (!p) return false;
-    // C:\..., D:\...
     if (/^[a-zA-Z]:\\/.test(p)) return true;
-    // \\server\share
     if (/^\\\\/.test(p)) return true;
     return false;
   }
 
   /**
-   * Store RELATIVE path in DB to avoid Windows absolute path leaking into production.
-   * Example saved in DB: uploads/daily-notes/2025-12-19/dn_xxx/staff.docx
+   * Store RELATIVE path in DB
    */
   private toDbPath(absPath: string): string {
     const rel = path.relative(process.cwd(), absPath);
-    // Normalize to forward slashes so it is stable across OS
     return rel.split(path.sep).join('/');
   }
 
   /**
    * Convert DB path to absolute path.
-   * - If DB path is already absolute POSIX, keep it.
-   * - If DB path is Windows absolute, treat as invalid (return null).
-   * - If DB path is relative, resolve from process.cwd().
    */
   private fromDbPath(dbPath?: string | null): string | null {
     if (!dbPath) return null;
     if (this.isObviouslyWindowsPath(dbPath)) return null;
 
-    // If it contains backslashes but not drive letter, normalize first
     const normalized = dbPath.replace(/\\/g, '/');
 
-    // POSIX absolute
     if (normalized.startsWith('/')) return normalized;
 
-    // Relative -> absolute
     return path.join(process.cwd(), normalized);
   }
 
   private resolveTemplatePath() {
-    // Support both dash types: "–" (en dash) and "-" (hyphen)
     const nameCandidates = [
       'Daily Note – Template.docx',
       'Daily Note - Template.docx',
@@ -100,23 +88,17 @@ export class FileReportsService {
     ];
 
     const dirCandidates = [
-      // Common when running from repo root
       path.join(process.cwd(), 'src', 'reports', 'templates'),
-      // Some setups run with cwd already at "src"
       path.join(process.cwd(), 'reports', 'templates'),
-      // If built assets are copied
       path.join(process.cwd(), 'dist', 'reports', 'templates'),
-      // Optional external folder
       path.join(process.cwd(), 'templates'),
     ];
 
-    // 1) explicit env path wins
     const envPath = process.env.DAILY_NOTE_TEMPLATE_PATH;
     if (envPath) {
       if (fs.existsSync(envPath)) return envPath;
     }
 
-    // 2) search
     const tried: string[] = [];
     for (const dir of dirCandidates) {
       for (const nm of nameCandidates) {
@@ -138,7 +120,117 @@ export class FileReportsService {
     return String(v);
   }
 
-  private buildTemplateData(dn: any) {
+  // -----------------------------
+  // Time helpers (HH:mm)
+  // -----------------------------
+  private parseHHmmToMinutes(v?: string | null): number | null {
+    if (!v) return null;
+    const s = String(v).trim();
+    const m = /^(\d{1,2}):(\d{2})$/.exec(s);
+    if (!m) return null;
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return hh * 60 + mm;
+  }
+
+  private diffMinutesAllowOvernight(startMin: number, endMin: number): number {
+    // allow overnight (e.g., 22:00 -> 06:00)
+    if (endMin >= startMin) return endMin - startMin;
+    return 24 * 60 - startMin + endMin;
+  }
+
+  private formatHours2(mins: number): string {
+    return (mins / 60).toFixed(2);
+  }
+
+  private calcUnits15(mins: number): number {
+    // safer: floor to 15-min blocks
+    return Math.floor(mins / 15);
+  }
+
+  // -----------------------------
+  // DB autofill: Individual & MA
+  // -----------------------------
+  private async getIndividualAutofill(individualId?: string | null): Promise<{
+    address1: string;
+    address2Line: string;
+    ma: string;
+  }> {
+    if (!individualId) return { address1: '', address2Line: '', ma: '' };
+
+    const ind = await this.prisma.individual.findUnique({
+      where: { id: individualId },
+      select: {
+        address1: true,
+        address2: true,
+        city: true,
+        state: true,
+        zip: true,
+        payers: {
+          select: { type: true, memberId: true },
+        },
+      },
+    });
+
+    if (!ind) return { address1: '', address2Line: '', ma: '' };
+
+    const address1 = this.safeStr(ind.address1 ?? '');
+
+    const city = this.safeStr(ind.city ?? '');
+    const state = this.safeStr(ind.state ?? '');
+    const zip = this.safeStr(ind.zip ?? '');
+    const addr2 = this.safeStr(ind.address2 ?? '');
+
+    // Address2Line: prefer address2, else City/State/Zip; or combine nicely
+    const cityLine = [city, state, zip]
+      .filter(Boolean)
+      .join(', ')
+      .replace(', ,', ',')
+      .trim();
+    const address2Line = addr2
+      ? cityLine
+        ? `${addr2} • ${cityLine}`
+        : addr2
+      : cityLine;
+
+    // MA: try Primary payer memberId first; else any payer memberId
+    const primary = (ind.payers ?? []).find(
+      (p) => String(p.type).toLowerCase() === 'primary',
+    );
+    const anyPayer = (ind.payers ?? [])[0];
+    const ma = this.safeStr(primary?.memberId ?? anyPayer?.memberId ?? '');
+
+    return { address1, address2Line, ma };
+  }
+
+  // -----------------------------
+  // DB autofill: Outcome from ISP & BSP (IspBspForm.formData)
+  // -----------------------------
+  private async getOutcomeAutofill(
+    individualId?: string | null,
+  ): Promise<string> {
+    if (!individualId) return '';
+
+    const row = await this.prisma.ispBspForm.findUnique({
+      where: { individualId },
+      select: { formData: true },
+    });
+
+    const fd: any = row?.formData ?? {};
+    const outcome =
+      fd.outcomeStatement || fd.outcomeText || fd.outcome || fd.outcomes || '';
+
+    if (Array.isArray(outcome)) return outcome.filter(Boolean).join('\n');
+    if (typeof outcome === 'object' && outcome) return JSON.stringify(outcome);
+    return this.safeStr(outcome);
+  }
+
+  // -----------------------------
+  // Build template data (AUTO)
+  // -----------------------------
+  private async buildTemplateData(dn: any) {
     const dateISO =
       dn.date instanceof Date
         ? this.localDateISO(dn.date)
@@ -147,73 +239,292 @@ export class FileReportsService {
           : '';
 
     const payload = dn.payload || {};
+
+    // ✅ DB autofill (Address + MA)
+    const auto = await this.getIndividualAutofill(dn.individualId ?? null);
+
+    // ✅ DB autofill (Outcome from ISP/BSP)
+    const outcomeAuto = await this.getOutcomeAutofill(dn.individualId ?? null);
+
+    // ✅ Meals
     const meals = payload.meals || payload.Meals || {};
-    const plan = payload.plan || payload.todayPlan || payload.todaysPlan || {};
+    const breakfast = meals.breakfast || meals.Breakfast || {};
+    const lunch = meals.lunch || meals.Lunch || {};
+    const dinner = meals.dinner || meals.Dinner || {};
+
+    // ✅ Service note text
+    const todayPlan =
+      payload.todayPlan || payload.todaysPlan || payload.plan || '';
+    const whatWeWorkedOn =
+      payload.whatWeWorkedOn ||
+      payload.communityInclusion ||
+      payload.workedOn ||
+      '';
+    const opportunities =
+      payload.opportunities ||
+      payload.prefOpportunities ||
+      payload.prefOpportunity ||
+      '';
+
+    // legacy objects
     const notes = payload.notes || payload.note || payload.progressNotes || {};
+    const planObj =
+      typeof payload.plan === 'object' && payload.plan ? payload.plan : {};
+    const todayPlanObj =
+      typeof payload.todayPlan === 'object' && payload.todayPlan
+        ? payload.todayPlan
+        : {};
+
+    const supportsDuringServiceLegacy =
+      todayPlanObj.supportsDuringService ??
+      planObj.supportsDuringService ??
+      notes.supportsDuringService ??
+      '';
+
+    const communityInclusionLegacy =
+      todayPlanObj.communityInclusion ??
+      planObj.communityInclusion ??
+      notes.communityInclusion ??
+      '';
+
+    const prefOpportunitiesLegacy =
+      todayPlanObj.prefOpportunities ??
+      planObj.prefOpportunities ??
+      notes.prefOpportunities ??
+      '';
+
+    // ✅ Compute totals if payload does NOT provide them
+    const schedStartStr = this.safeStr(
+      dn.scheduleStart || payload.scheduleStart || '',
+    );
+    const schedEndStr = this.safeStr(
+      dn.scheduleEnd || payload.scheduleEnd || '',
+    );
+    const visitStartStr = this.safeStr(
+      dn.visitStart || payload.visitStart || '',
+    );
+    const visitEndStr = this.safeStr(dn.visitEnd || payload.visitEnd || '');
+
+    const schedStartMin = this.parseHHmmToMinutes(schedStartStr);
+    const schedEndMin = this.parseHHmmToMinutes(schedEndStr);
+    const visitStartMin = this.parseHHmmToMinutes(visitStartStr);
+    const visitEndMin = this.parseHHmmToMinutes(visitEndStr);
+
+    let plannedMinutes: number | null = null;
+    if (schedStartMin !== null && schedEndMin !== null) {
+      plannedMinutes = this.diffMinutesAllowOvernight(
+        schedStartMin,
+        schedEndMin,
+      );
+    }
+
+    let actualMinutes: number | null = null;
+    if (visitStartMin !== null && visitEndMin !== null) {
+      actualMinutes = this.diffMinutesAllowOvernight(
+        visitStartMin,
+        visitEndMin,
+      );
+    }
+
+    const totalH =
+      payload.totalH ||
+      payload.totalHours ||
+      (actualMinutes !== null ? this.formatHours2(actualMinutes) : '');
+
+    const billableUnits =
+      payload.billableUnits ||
+      payload.units ||
+      (actualMinutes !== null ? String(this.calcUnits15(actualMinutes)) : '');
+
+    const lostMinutes =
+      payload.lostMinutes ??
+      (plannedMinutes !== null &&
+      actualMinutes !== null &&
+      plannedMinutes > actualMinutes
+        ? String(plannedMinutes - actualMinutes)
+        : '');
+
+    const lostUnits =
+      payload.lostUnits ??
+      (typeof lostMinutes === 'string' && lostMinutes !== ''
+        ? String(this.calcUnits15(Number(lostMinutes)))
+        : '');
+
+    const underHours =
+      payload.underHours ??
+      (plannedMinutes !== null &&
+      actualMinutes !== null &&
+      plannedMinutes > actualMinutes
+        ? this.formatHours2(plannedMinutes - actualMinutes)
+        : '');
+
+    const overHours =
+      payload.overHours ||
+      payload.OverHours ||
+      (plannedMinutes !== null &&
+      actualMinutes !== null &&
+      actualMinutes > plannedMinutes
+        ? this.formatHours2(actualMinutes - plannedMinutes)
+        : '');
+
+    // ✅ Mileage: template needs {{Mileage}}
+    const mileage = dn.mileage ?? payload.mileage ?? payload.totalMileage ?? '';
 
     return {
       ServiceType: this.safeStr(dn.serviceName || dn.serviceCode || ''),
       PatientName: this.safeStr(dn.individualName || ''),
-      PatientMA: this.safeStr(payload.patientMA || payload.ma || ''),
+      PatientMA: this.safeStr(
+        payload.patientMA ||
+          payload.ma ||
+          payload.individualMa ||
+          auto.ma ||
+          '',
+      ),
       DateFull: dateISO,
 
-      StaffNickname: this.safeStr(dn.staffName || ''),
+      StaffNickname: this.safeStr(dn.staffName || payload.staffName || ''),
 
-      ScheduleStart: this.safeStr(dn.scheduleStart || ''),
-      ScheduleEnd: this.safeStr(dn.scheduleEnd || ''),
+      ScheduleStart: this.safeStr(schedStartStr),
+      ScheduleEnd: this.safeStr(schedEndStr),
 
-      StartTime: this.safeStr(dn.visitStart || ''),
-      EndTime: this.safeStr(dn.visitEnd || ''),
+      StartTime: this.safeStr(visitStartStr),
+      EndTime: this.safeStr(visitEndStr),
 
-      TotalH: this.safeStr(payload.totalH || payload.totalHours || ''),
-      BillableUnits: this.safeStr(payload.billableUnits || payload.units || ''),
-      LostMinutes: this.safeStr(payload.lostMinutes || ''),
-      LostUnits: this.safeStr(payload.lostUnits || ''),
-      UnderHours: this.safeStr(payload.underHours || ''),
-      OverHours: this.safeStr(payload.overHours || payload.OverHours || ''),
-      OverReason: this.safeStr(payload.overReason || ''),
-      CancelReason: this.safeStr(dn.cancelReason || payload.cancelReason || ''),
-      ShortReason: this.safeStr(payload.shortReason || ''),
+      // ✅ totals
+      TotalH: this.safeStr(totalH),
+      BillableUnits: this.safeStr(billableUnits),
+      LostMinutes: this.safeStr(lostMinutes),
+      LostUnits: this.safeStr(lostUnits),
+      UnderHours: this.safeStr(underHours),
+      OverHours: this.safeStr(overHours),
 
-      OutcomeText: this.safeStr(payload.outcomeText || payload.outcome || ''),
-      PatientAddress1: this.safeStr(payload.patientAddress1 || ''),
-      PatientAddress2: this.safeStr(payload.patientAddress2 || ''),
+      // ✅ Mileage
+      Mileage: this.safeStr(mileage),
 
+      OverReason: this.safeStr(
+        (payload.overReason ?? payload.overReasonText ?? '') as any,
+      ),
+      CancelReason: this.safeStr(
+        (dn.cancelReason ?? payload.cancelReason ?? '') as any,
+      ),
+      ShortReason: this.safeStr((payload.shortReason ?? '') as any),
+
+      // ✅ Outcome (payload first, fallback to ISP/BSP)
+      OutcomeText: this.safeStr(
+        payload.outcomeText ||
+          payload.outcome ||
+          payload.outcomeName ||
+          outcomeAuto ||
+          '',
+      ),
+
+      // ✅ Address from DB first (stable)
+      PatientAddress1: this.safeStr(
+        payload.patientAddress1 ||
+          payload.individualAddress1 ||
+          auto.address1 ||
+          payload.individualAddress ||
+          '',
+      ),
+      PatientAddress2: this.safeStr(
+        payload.patientAddress2 ||
+          payload.individualAddress2 ||
+          auto.address2Line ||
+          '',
+      ),
+
+      // ✅ Page 2
       SupportsDuringService: this.safeStr(
-        plan.supportsDuringService || notes.supportsDuringService || '',
+        typeof todayPlan === 'string' ? todayPlan : supportsDuringServiceLegacy,
       ),
       CommunityInclusion: this.safeStr(
-        plan.communityInclusion || notes.communityInclusion || '',
+        typeof whatWeWorkedOn === 'string'
+          ? whatWeWorkedOn
+          : communityInclusionLegacy,
       ),
       PrefOpportunities: this.safeStr(
-        plan.prefOpportunities || notes.prefOpportunities || '',
+        typeof opportunities === 'string'
+          ? opportunities
+          : prefOpportunitiesLegacy,
       ),
 
+      // ✅ Meals
       BreakfastTime: this.safeStr(
-        meals.breakfastTime || meals.BreakfastTime || '',
+        breakfast.time ||
+          breakfast.Time ||
+          meals.breakfastTime ||
+          meals.BreakfastTime ||
+          '',
       ),
       BreakfastHad: this.safeStr(
-        meals.breakfastHad || meals.BreakfastHad || '',
+        breakfast.had ||
+          breakfast.Had ||
+          meals.breakfastHad ||
+          meals.BreakfastHad ||
+          '',
       ),
       BreakfastOffered: this.safeStr(
-        meals.breakfastOffered || meals.BreakfastOffered || '',
+        breakfast.offered ||
+          breakfast.Offered ||
+          meals.breakfastOffered ||
+          meals.BreakfastOffered ||
+          '',
       ),
 
-      LunchTime: this.safeStr(meals.lunchTime || meals.LunchTime || ''),
-      LunchHad: this.safeStr(meals.lunchHad || meals.LunchHad || ''),
+      LunchTime: this.safeStr(
+        lunch.time || lunch.Time || meals.lunchTime || meals.LunchTime || '',
+      ),
+      LunchHad: this.safeStr(
+        lunch.had || lunch.Had || meals.lunchHad || meals.LunchHad || '',
+      ),
       LunchOffered: this.safeStr(
-        meals.lunchOffered || meals.LunchOffered || '',
+        lunch.offered ||
+          lunch.Offered ||
+          meals.lunchOffered ||
+          meals.LunchOffered ||
+          '',
       ),
 
-      DinnerTime: this.safeStr(meals.dinnerTime || meals.DinnerTime || ''),
-      DinnerHad: this.safeStr(meals.dinnerHad || meals.DinnerHad || ''),
+      DinnerTime: this.safeStr(
+        dinner.time ||
+          dinner.Time ||
+          meals.dinnerTime ||
+          meals.DinnerTime ||
+          '',
+      ),
+      DinnerHad: this.safeStr(
+        dinner.had || dinner.Had || meals.dinnerHad || meals.DinnerHad || '',
+      ),
       DinnerOffered: this.safeStr(
-        meals.dinnerOffered || meals.DinnerOffered || '',
+        dinner.offered ||
+          dinner.Offered ||
+          meals.dinnerOffered ||
+          meals.DinnerOffered ||
+          '',
       ),
 
-      STAFF_SIGNATURE: '',
-      INDIVIDUAL_SIGNATURE: '',
+      // ✅ Signatures: hiện tại docxtemplater không embed image.
+      // Tạm thời: nếu có chữ ký thì ghi "Signed" để không trống.
+      STAFF_SIGNATURE: this.safeStr(
+        payload.dspSignature || payload.staffSignature ? 'Signed' : '',
+      ),
+      INDIVIDUAL_SIGNATURE: this.safeStr(
+        payload.individualSignature || payload.clientSignature ? 'Signed' : '',
+      ),
     };
+  }
+
+  /**
+   * ✅ PREVIEW DATA
+   * MUST match DOC/PDF autofill exactly (Outcome from ISP/BSP included)
+   */
+  async getPreviewData(dailyNoteId: string) {
+    const dn = await this.prisma.dailyNote.findUnique({
+      where: { id: dailyNoteId },
+    });
+    if (!dn) throw new Error('DailyNote not found');
+
+    return this.buildTemplateData(dn);
   }
 
   private async renderDocxFromTemplate(dn: any): Promise<Buffer> {
@@ -227,7 +538,7 @@ export class FileReportsService {
       delimiters: { start: '{{', end: '}}' },
     });
 
-    const data = this.buildTemplateData(dn);
+    const data = await this.buildTemplateData(dn);
 
     try {
       doc.render(data);
@@ -282,10 +593,6 @@ export class FileReportsService {
     return absPath;
   }
 
-  /**
-   * Resolve LibreOffice soffice command.
-   * On Render native environment, soffice usually does NOT exist => ENOENT.
-   */
   private resolveSofficeCommand(): string {
     const envPath =
       process.env.SOFFICE_PATH ||
@@ -294,7 +601,6 @@ export class FileReportsService {
 
     if (envPath && fs.existsSync(envPath)) return envPath;
 
-    // Windows candidates (local dev)
     const winCandidates = [
       'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
       'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
@@ -303,7 +609,6 @@ export class FileReportsService {
       if (fs.existsSync(p)) return p;
     }
 
-    // Linux/mac: rely on PATH
     return 'soffice';
   }
 
@@ -348,9 +653,6 @@ export class FileReportsService {
     });
   }
 
-  // ==========================
-  // ✅ CloudConvert DOCX -> PDF
-  // ==========================
   private async convertDocxToPdfCloud(docxAbsPath: string): Promise<Buffer> {
     if (!this.cloudConvert) {
       throw new Error(
@@ -358,7 +660,6 @@ export class FileReportsService {
       );
     }
 
-    // Create job: upload -> convert -> export/url
     const job = await this.cloudConvert.jobs.create({
       tasks: {
         'import-1': { operation: 'import/upload' },
@@ -380,27 +681,21 @@ export class FileReportsService {
     const importTask: any = job.tasks.find((t: any) => t.name === 'import-1');
     if (!importTask) throw new Error('CloudConvert import task not found');
 
-    // Upload file stream
     await this.cloudConvert.tasks.upload(
       importTask,
       fs.createReadStream(docxAbsPath),
       path.basename(docxAbsPath),
     );
 
-    // Wait for completion
     const done = await this.cloudConvert.jobs.wait(job.id);
     const exportTask: any = done.tasks.find((t: any) => t.name === 'export-1');
     const fileUrl = exportTask?.result?.files?.[0]?.url;
 
-    if (!fileUrl) {
-      throw new Error('CloudConvert export URL not found');
-    }
+    if (!fileUrl) throw new Error('CloudConvert export URL not found');
 
-    // Download PDF bytes
     const res = await fetch(fileUrl);
-    if (!res.ok) {
+    if (!res.ok)
       throw new Error(`CloudConvert download failed: HTTP ${res.status}`);
-    }
     return Buffer.from(await res.arrayBuffer());
   }
 
@@ -454,7 +749,6 @@ export class FileReportsService {
 
     const absPdfPath = path.join(baseDir, 'staff.pdf');
 
-    // If DB has old Windows path, ignore it and regenerate
     let docxAbs: string | null = this.fromDbPath(dn.staffReportDocPath ?? null);
 
     try {
@@ -462,12 +756,10 @@ export class FileReportsService {
         docxAbs = await this.generateStaffDocx(dailyNoteId);
       }
 
-      // ✅ Production: CloudConvert => PDF matches DOC exactly
       if (this.cloudConvert) {
         const pdfBuf = await this.convertDocxToPdfCloud(docxAbs);
         await fs.writeFile(absPdfPath, pdfBuf);
       } else {
-        // ✅ Local/dev: LibreOffice if available; else fallback
         const converted = await this.tryConvertDocxToPdf(docxAbs, baseDir);
         if (converted) {
           if (path.resolve(converted) !== path.resolve(absPdfPath)) {
@@ -518,12 +810,10 @@ export class FileReportsService {
         docxAbs = await this.generateIndividualDocx(dailyNoteId);
       }
 
-      // ✅ Production: CloudConvert => PDF matches DOC exactly
       if (this.cloudConvert) {
         const pdfBuf = await this.convertDocxToPdfCloud(docxAbs);
         await fs.writeFile(absPdfPath, pdfBuf);
       } else {
-        // ✅ Local/dev: LibreOffice if available; else fallback
         const converted = await this.tryConvertDocxToPdf(docxAbs, baseDir);
         if (converted) {
           if (path.resolve(converted) !== path.resolve(absPdfPath)) {

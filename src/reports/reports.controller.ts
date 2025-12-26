@@ -51,6 +51,20 @@ export class ReportsController {
   }
 
   /**
+   * ✅ PREVIEW
+   * GET /reports/daily-notes/:id/preview
+   * Returns SAME data used by DOC/PDF (Outcome from ISP/BSP included)
+   */
+  @Get('daily-notes/:id/preview')
+  async previewDailyNote(@Param('id') id: string) {
+    try {
+      return await this.fileReportsService.getPreviewData(id);
+    } catch (e: any) {
+      throw new NotFoundException(e?.message || 'Preview not available');
+    }
+  }
+
+  /**
    * Direct download DOC/PDF (no Google Drive)
    * GET /reports/daily-notes/:id/download/:type
    */

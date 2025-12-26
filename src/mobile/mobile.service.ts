@@ -2,7 +2,8 @@
 //  src/mobile/mobile.service.ts
 //  - Timezone: America/New_York (Altoona, PA)
 //  - Save Daily Note into DailyNote table
-//  - Google export is gated by env ENABLE_GOOGLE_REPORTS=1
+//  - Compute template fields (TotalH/Units/Lost/Over/Under) at submit time
+//  - Google Drive export is gated by env ENABLE_GOOGLE_REPORTS=1
 // ======================================================
 
 import { Injectable } from '@nestjs/common';
@@ -18,8 +19,14 @@ import { DateTime } from 'luxon';
 import { PrismaService } from '../prisma/prisma.service';
 import { GoogleReportsService } from '../reports/google-reports.service';
 
+/**
+ * Mobile shift status
+ */
 export type ShiftStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED';
 
+/**
+ * Mobile shift DTO
+ */
 export interface MobileShift {
   id: string;
   date: string;
@@ -39,6 +46,9 @@ export interface MobileShift {
   outcomeText?: string | null;
 }
 
+/**
+ * Payload from mobile
+ */
 export interface MobileDailyNotePayload {
   shiftId: string;
   staffId: string;
@@ -75,12 +85,20 @@ export interface MobileDailyNotePayload {
   incidentNotes?: string;
 
   staffName?: string;
-  certifyText?: string;
+  staffEmail?: string;
 
   mileage?: number;
 
-  // Mobile app may send additional fields (signatures, cancel, etc.).
-  // We keep all of them inside payload JSON to avoid schema mismatch issues.
+  // NEW (mobile already sends these at runtime)
+  isCanceled?: boolean;
+  cancelReason?: string;
+
+  // Signatures are included in payload JSON (file reports service reads these)
+  dspSignature?: string;
+  individualSignature?: string;
+
+  // Optional (if you want to store/compute)
+  overReason?: string;
 }
 
 export type CheckMode = 'IN' | 'OUT';
@@ -96,11 +114,62 @@ export interface CheckInOutResponse {
 
 const TZ = 'America/New_York';
 
+/**
+ * IMPORTANT:
+ * Never use JS Date.getHours()/getMinutes() because it depends on server timezone.
+ * Always format using Luxon with explicit time zone (America/New_York).
+ */
 function formatTimeHHmmInTZ(dt: Date | null | undefined): string | null {
   if (!dt) return null;
   return DateTime.fromJSDate(dt, { zone: 'utc' }).setZone(TZ).toFormat('HH:mm');
 }
 
+/**
+ * Parse "HH:mm" into minutes from 00:00.
+ */
+function hhmmToMinutes(hhmm?: string | null): number | null {
+  if (!hhmm) return null;
+  const m = /^(\d{2}):(\d{2})$/.exec(String(hhmm));
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  return hh * 60 + mm;
+}
+
+/**
+ * Compute duration minutes with overnight support.
+ */
+function computeDurationMinutes(
+  startHHmm?: string | null,
+  endHHmm?: string | null,
+): number | null {
+  const s = hhmmToMinutes(startHHmm);
+  const e = hhmmToMinutes(endHHmm);
+  if (s === null || e === null) return null;
+  let diff = e - s;
+  if (diff < 0) diff += 1440; // overnight
+  return diff;
+}
+
+/**
+ * Convert minutes to hours string (2 decimals).
+ */
+function minutesToHoursStr(mins: number): string {
+  const hrs = mins / 60;
+  return hrs.toFixed(2);
+}
+
+/**
+ * Convert minutes to 15-min units (ceil).
+ */
+function minutesToUnits(mins: number): number {
+  return Math.ceil(mins / 15);
+}
+
+/**
+ * Helper: format address
+ */
 function formatAddress(ind: Individual): string {
   const parts = [
     ind.address1 ?? '',
@@ -110,9 +179,13 @@ function formatAddress(ind: Individual): string {
   ]
     .map((p) => p?.trim())
     .filter((p) => !!p);
+
   return parts.join(', ');
 }
 
+/**
+ * Helper: map ScheduleShift -> MobileShift
+ */
 function mapShiftToMobileShift(params: {
   shift: ScheduleShift & {
     individual: Individual;
@@ -127,6 +200,7 @@ function mapShiftToMobileShift(params: {
   const service = shift.service;
   const visits = shift.visits ?? [];
 
+  // Status
   let status: ShiftStatus = 'NOT_STARTED';
   switch (shift.status) {
     case ScheduleStatus.IN_PROGRESS:
@@ -138,6 +212,7 @@ function mapShiftToMobileShift(params: {
       break;
   }
 
+  // Visits for DSP on the same local day (America/New_York)
   const visitsForDsp = visits.filter((v) => {
     if (v.dspId !== staffId || !v.checkInAt) return false;
     const localDateStr = DateTime.fromJSDate(v.checkInAt)
@@ -161,6 +236,7 @@ function mapShiftToMobileShift(params: {
       return vEnd > maxEnd ? v : max;
     });
 
+    // Format times in America/New_York (stable on any server timezone)
     visitStart = formatTimeHHmmInTZ(earliest.checkInAt);
     visitEnd = formatTimeHHmmInTZ(latest.checkOutAt ?? latest.checkInAt);
 
@@ -168,6 +244,7 @@ function mapShiftToMobileShift(params: {
     else status = 'COMPLETED';
   }
 
+  // Planned start/end format in America/New_York
   const scheduleStart = formatTimeHHmmInTZ(shift.plannedStart) ?? '';
   const scheduleEnd = formatTimeHHmmInTZ(shift.plannedEnd) ?? '';
 
@@ -177,7 +254,7 @@ function mapShiftToMobileShift(params: {
     individualId: individual.id,
     individualName: `${individual.firstName} ${individual.lastName}`.trim(),
     individualDob: individual.dob ?? '',
-    individualMa: '',
+    individualMa: '', // (optional: later map from Payer/memberId if you want)
     individualAddress: formatAddress(individual),
     serviceCode: service.serviceCode,
     serviceName: service.serviceName,
@@ -198,6 +275,9 @@ export class MobileService {
     private readonly reportsService: GoogleReportsService,
   ) {}
 
+  // =====================================================
+  // Today shifts for mobile
+  // =====================================================
   async getTodayShifts(
     staffId: string,
     date: string,
@@ -236,7 +316,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // Save Daily Note from mobile (SAFE MODE)
+  // Save Daily Note from mobile
   // =====================================================
   async submitDailyNote(payload: MobileDailyNotePayload) {
     const {
@@ -267,16 +347,49 @@ export class MobileService {
       select: { id: true },
     });
 
-    // NOTE: Mobile may send cancel fields even if not in the TS interface.
-    const isCanceled = (payload as any)?.isCanceled === true;
-    const cancelReason =
-      typeof (payload as any)?.cancelReason === 'string'
-        ? String((payload as any).cancelReason).trim()
-        : null;
+    // =====================================================
+    // Compute template fields for DOCX/PDF autofill
+    // =====================================================
+    const plannedMins = computeDurationMinutes(scheduleStart, scheduleEnd);
+    const visitedMins = computeDurationMinutes(
+      visitStart ?? null,
+      visitEnd ?? null,
+    );
 
-    // SAFE CREATE:
-    // - Only write core columns that are guaranteed in schema
-    // - Do NOT write any report fields (staffReportDocPath, etc.) to avoid Prisma Client mismatch on Render
+    const totalH = visitedMins !== null ? minutesToHoursStr(visitedMins) : '';
+    const billableUnits =
+      visitedMins !== null ? String(minutesToUnits(visitedMins)) : '';
+
+    const lostMinutes =
+      plannedMins !== null && visitedMins !== null && visitedMins < plannedMins
+        ? plannedMins - visitedMins
+        : 0;
+
+    const overMinutes =
+      plannedMins !== null && visitedMins !== null && visitedMins > plannedMins
+        ? visitedMins - plannedMins
+        : 0;
+
+    const underHours = lostMinutes > 0 ? minutesToHoursStr(lostMinutes) : '';
+
+    const overHours = overMinutes > 0 ? minutesToHoursStr(overMinutes) : '';
+
+    const computedPayload: any = {
+      ...payload,
+      totalH,
+      billableUnits,
+      lostMinutes: lostMinutes > 0 ? String(lostMinutes) : '',
+      lostUnits: lostMinutes > 0 ? String(minutesToUnits(lostMinutes)) : '',
+      underHours,
+      overHours,
+    };
+
+    const isCanceled = payload.isCanceled === true;
+    const cancelReason = isCanceled
+      ? String(payload.cancelReason ?? '').trim()
+      : null;
+
+    // 1) Save DailyNote
     const record = await this.prisma.dailyNote.create({
       data: {
         shiftId,
@@ -296,18 +409,43 @@ export class MobileService {
         visitEnd: visitEnd ?? null,
 
         mileage: typeof mileage === 'number' ? mileage : null,
-        isCanceled,
-        cancelReason: isCanceled ? cancelReason : null,
 
-        payload: payload as unknown as object,
+        // ✅ FIX: respect cancel from mobile
+        isCanceled,
+        cancelReason,
+
+        // ✅ Save full payload (includes computed fields + meals + signatures)
+        payload: computedPayload as unknown as object,
+
+        // legacy fields
+        staffReportFileId: null,
+        individualReportFileId: null,
+
+        // NOTE: If your schema uses direct-download paths (staffReportPdfPath, etc.)
+        // do NOT set any unknown fields here.
       } as any,
     });
 
-    // Optional: generate docs (but do NOT update DB report columns here)
+    // 2) Google export
     const enableGoogle = process.env.ENABLE_GOOGLE_REPORTS === '1';
     if (enableGoogle) {
       try {
-        await this.reportsService.generateDailyNoteDocs(record.id, payload);
+        const { staff, individual } =
+          await this.reportsService.generateDailyNoteDocs(
+            record.id,
+            computedPayload,
+          );
+
+        // Save BOTH doc+pdf IDs so Web Reports can show links
+        await this.prisma.dailyNote.update({
+          where: { id: record.id },
+          data: {
+            // legacy fields (keep for compatibility; prefer pdf)
+            staffReportFileId: staff?.pdfId ?? staff?.docId ?? null,
+            individualReportFileId:
+              individual?.pdfId ?? individual?.docId ?? null,
+          } as any,
+        });
       } catch (err) {
         console.error(
           '[MobileService] Failed to generate Google Docs/PDF',
@@ -319,6 +457,9 @@ export class MobileService {
     return { status: 'OK', id: record.id };
   }
 
+  // =====================================================
+  // Check-in
+  // =====================================================
   async checkInShift(
     shiftId: string,
     staffId: string,
@@ -369,6 +510,9 @@ export class MobileService {
     };
   }
 
+  // =====================================================
+  // Check-out
+  // =====================================================
   async checkOutShift(
     shiftId: string,
     staffId: string,
