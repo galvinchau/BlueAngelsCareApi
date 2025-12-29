@@ -16,6 +16,8 @@ import CloudConvert from 'cloudconvert';
 
 const TZ = 'America/New_York';
 
+type ReportType = 'staff' | 'individual';
+
 @Injectable()
 export class FileReportsService {
   // ✅ only enabled when CLOUDCONVERT_API_KEY exists
@@ -230,7 +232,7 @@ export class FileReportsService {
   // -----------------------------
   // Build template data (AUTO)
   // -----------------------------
-  private async buildTemplateData(dn: any) {
+  private async buildTemplateData(dn: any, reportType: ReportType) {
     const dateISO =
       dn.date instanceof Date
         ? this.localDateISO(dn.date)
@@ -370,16 +372,41 @@ export class FileReportsService {
     // ✅ Mileage: template needs {{Mileage}}
     const mileage = dn.mileage ?? payload.mileage ?? payload.totalMileage ?? '';
 
+    // ✅ IMPORTANT FIX:
+    // Address MUST prefer DB autofill first (avoid payload accidentally storing company address)
+    const address1DbFirst =
+      auto.address1 ||
+      payload.patientAddress1 ||
+      payload.individualAddress1 ||
+      payload.individualAddress ||
+      '';
+
+    const address2DbFirst =
+      auto.address2Line ||
+      payload.patientAddress2 ||
+      payload.individualAddress2 ||
+      '';
+
+    // ✅ MA prefer payload, fallback DB
+    const ma = this.safeStr(
+      payload.patientMA || payload.ma || payload.individualMa || auto.ma || '',
+    );
+
+    // ✅ Signatures: docxtemplater cannot embed image; use "Signed" marker
+    const staffSigned =
+      payload.dspSignature || payload.staffSignature ? 'Signed' : '';
+    const individualSigned =
+      payload.individualSignature || payload.clientSignature ? 'Signed' : '';
+
+    // If you ever want different mapping staff vs individual later:
+    // right now keys are same to keep preview == DOC/PDF.
+    // reportType is kept for future extension without breaking API.
+    const _rt = reportType; // keep for readability & future branching
+
     return {
       ServiceType: this.safeStr(dn.serviceName || dn.serviceCode || ''),
       PatientName: this.safeStr(dn.individualName || ''),
-      PatientMA: this.safeStr(
-        payload.patientMA ||
-          payload.ma ||
-          payload.individualMa ||
-          auto.ma ||
-          '',
-      ),
+      PatientMA: ma,
       DateFull: dateISO,
 
       StaffNickname: this.safeStr(dn.staffName || payload.staffName || ''),
@@ -402,12 +429,10 @@ export class FileReportsService {
       Mileage: this.safeStr(mileage),
 
       OverReason: this.safeStr(
-        (payload.overReason ?? payload.overReasonText ?? '') as any,
+        payload.overReason ?? payload.overReasonText ?? '',
       ),
-      CancelReason: this.safeStr(
-        (dn.cancelReason ?? payload.cancelReason ?? '') as any,
-      ),
-      ShortReason: this.safeStr((payload.shortReason ?? '') as any),
+      CancelReason: this.safeStr(dn.cancelReason ?? payload.cancelReason ?? ''),
+      ShortReason: this.safeStr(payload.shortReason ?? ''),
 
       // ✅ Outcome (payload first, fallback to ISP/BSP)
       OutcomeText: this.safeStr(
@@ -419,19 +444,8 @@ export class FileReportsService {
       ),
 
       // ✅ Address from DB first (stable)
-      PatientAddress1: this.safeStr(
-        payload.patientAddress1 ||
-          payload.individualAddress1 ||
-          auto.address1 ||
-          payload.individualAddress ||
-          '',
-      ),
-      PatientAddress2: this.safeStr(
-        payload.patientAddress2 ||
-          payload.individualAddress2 ||
-          auto.address2Line ||
-          '',
-      ),
+      PatientAddress1: this.safeStr(address1DbFirst),
+      PatientAddress2: this.safeStr(address2DbFirst),
 
       // ✅ Page 2
       SupportsDuringService: this.safeStr(
@@ -503,28 +517,24 @@ export class FileReportsService {
           '',
       ),
 
-      // ✅ Signatures: hiện tại docxtemplater không embed image.
-      // Tạm thời: nếu có chữ ký thì ghi "Signed" để không trống.
-      STAFF_SIGNATURE: this.safeStr(
-        payload.dspSignature || payload.staffSignature ? 'Signed' : '',
-      ),
-      INDIVIDUAL_SIGNATURE: this.safeStr(
-        payload.individualSignature || payload.clientSignature ? 'Signed' : '',
-      ),
+      STAFF_SIGNATURE: this.safeStr(staffSigned),
+      INDIVIDUAL_SIGNATURE: this.safeStr(individualSigned),
     };
   }
 
   /**
    * ✅ PREVIEW DATA
    * MUST match DOC/PDF autofill exactly (Outcome from ISP/BSP included)
+   *
+   * GET /reports/daily-notes/:id/preview?type=staff|individual
    */
-  async getPreviewData(dailyNoteId: string) {
+  async getPreviewData(dailyNoteId: string, reportType: ReportType = 'staff') {
     const dn = await this.prisma.dailyNote.findUnique({
       where: { id: dailyNoteId },
     });
     if (!dn) throw new Error('DailyNote not found');
 
-    return this.buildTemplateData(dn);
+    return this.buildTemplateData(dn, reportType);
   }
 
   private async renderDocxFromTemplate(dn: any): Promise<Buffer> {
@@ -538,7 +548,8 @@ export class FileReportsService {
       delimiters: { start: '{{', end: '}}' },
     });
 
-    const data = await this.buildTemplateData(dn);
+    // DOC/PDF generation uses same mapping as preview (staff keys)
+    const data = await this.buildTemplateData(dn, 'staff');
 
     try {
       doc.render(data);

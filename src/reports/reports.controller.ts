@@ -45,22 +45,45 @@ export class ReportsController {
    */
   @Get('daily-notes/:id')
   async getDailyNoteDetail(@Param('id') id: string) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
     const dn = await this.reportsService.getDailyNoteDetail(id);
     if (!dn) throw new NotFoundException('DailyNote not found');
     return dn;
   }
 
   /**
-   * ✅ PREVIEW
+   * ✅ PREVIEW DATA (match DOC/PDF template mapping)
    * GET /reports/daily-notes/:id/preview
-   * Returns SAME data used by DOC/PDF (Outcome from ISP/BSP included)
    */
   @Get('daily-notes/:id/preview')
-  async previewDailyNote(@Param('id') id: string) {
+  async getDailyNotePreview(@Param('id') id: string) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
     try {
-      return await this.fileReportsService.getPreviewData(id);
+      const data = await this.fileReportsService.getPreviewData(id);
+      return data;
     } catch (e: any) {
-      throw new NotFoundException(e?.message || 'Preview not available');
+      const msg = e?.message ?? String(e);
+
+      // Map common errors to proper HTTP codes
+      if (msg.toLowerCase().includes('not found')) {
+        throw new NotFoundException('DailyNote not found');
+      }
+
+      if (
+        msg.toLowerCase().includes('missing id') ||
+        msg.toLowerCase().includes('invalid id')
+      ) {
+        throw new BadRequestException(msg);
+      }
+
+      // Default: bad request (so web shows readable error)
+      throw new BadRequestException(msg);
     }
   }
 
