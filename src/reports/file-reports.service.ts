@@ -75,7 +75,6 @@ export class FileReportsService {
     if (this.isObviouslyWindowsPath(dbPath)) return null;
 
     const normalized = dbPath.replace(/\\/g, '/');
-
     if (normalized.startsWith('/')) return normalized;
 
     return path.join(process.cwd(), normalized);
@@ -153,6 +152,233 @@ export class FileReportsService {
   }
 
   // -----------------------------
+  // Signature helpers
+  // -----------------------------
+  private isDataUrlImage(s?: string | null): boolean {
+    if (!s) return false;
+    return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(s));
+  }
+
+  private extractSignatureDataUrls(payload: any): {
+    staffSigDataUrl: string;
+    individualSigDataUrl: string;
+  } {
+    const p = payload || {};
+
+    // Mobile payload keys we saw:
+    // - dspSignature: "data:image/png;base64,..."
+    // - individualSignature: "data:image/png;base64,..."
+    const staff =
+      p.dspSignature ||
+      p.staffSignature ||
+      p.StaffSignature ||
+      p.dsp_signature ||
+      '';
+
+    const ind =
+      p.individualSignature ||
+      p.clientSignature ||
+      p.IndividualSignature ||
+      p.individual_signature ||
+      '';
+
+    return {
+      staffSigDataUrl: this.isDataUrlImage(staff) ? String(staff) : '',
+      individualSigDataUrl: this.isDataUrlImage(ind) ? String(ind) : '',
+    };
+  }
+
+  private dataUrlToPngBuffer(dataUrl: string): Buffer | null {
+    if (!this.isDataUrlImage(dataUrl)) return null;
+    const idx = dataUrl.indexOf('base64,');
+    if (idx < 0) return null;
+    const b64 = dataUrl.slice(idx + 'base64,'.length);
+    try {
+      return Buffer.from(b64, 'base64');
+    } catch {
+      return null;
+    }
+  }
+
+  private ensurePngContentType(ctXml: string): string {
+    if (
+      ctXml.includes('Extension="png"') ||
+      ctXml.includes("Extension='png'")
+    ) {
+      return ctXml;
+    }
+
+    // Add before closing </Types>
+    const insert = '<Default Extension="png" ContentType="image/png"/>';
+    if (ctXml.includes('</Types>')) {
+      return ctXml.replace('</Types>', `${insert}</Types>`);
+    }
+    return ctXml;
+  }
+
+  private nextRelId(relsXml: string): number {
+    const ids = Array.from(relsXml.matchAll(/Id="rId(\d+)"/g)).map((m) =>
+      Number(m[1]),
+    );
+    const max = ids.length ? Math.max(...ids) : 0;
+    return max + 1;
+  }
+
+  // Fixed display size (px -> EMU)
+  // 1 px @96dpi = 9525 EMU
+  private pxToEmu(px: number): number {
+    return Math.round(px * 9525);
+  }
+
+  private buildDrawingXml(
+    rId: string,
+    filename: string,
+    cxEmu: number,
+    cyEmu: number,
+  ): string {
+    // Minimal WordprocessingML inline image
+    // Note: keep it in one run context replacement
+    const docPrId = Math.floor(Math.random() * 100000) + 1;
+    const picId = Math.floor(Math.random() * 100000) + 1;
+
+    return (
+      `<w:drawing>` +
+      `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+      `<wp:extent cx="${cxEmu}" cy="${cyEmu}"/>` +
+      `<wp:docPr id="${docPrId}" name="${this.safeStr(filename)}"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:nvPicPr>` +
+      `<pic:cNvPr id="${picId}" name="${this.safeStr(filename)}"/>` +
+      `<pic:cNvPicPr/>` +
+      `</pic:nvPicPr>` +
+      `<pic:blipFill>` +
+      `<a:blip r:embed="${rId}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>` +
+      `<a:stretch><a:fillRect/></a:stretch>` +
+      `</pic:blipFill>` +
+      `<pic:spPr>` +
+      `<a:xfrm>` +
+      `<a:off x="0" y="0"/>` +
+      `<a:ext cx="${cxEmu}" cy="${cyEmu}"/>` +
+      `</a:xfrm>` +
+      `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+      `</pic:spPr>` +
+      `</pic:pic>` +
+      `</a:graphicData>` +
+      `</a:graphic>` +
+      `</wp:inline>` +
+      `</w:drawing>`
+    );
+  }
+
+  /**
+   * Inject signature PNG images into DOCX by replacing placeholders:
+   * - {%.StaffSignatureImage%}
+   * - {%.IndividualSignatureImage%}
+   *
+   * This avoids dumping base64 text into the document.
+   */
+  private injectSignatureImagesIntoDocx(
+    docxBuf: Buffer,
+    staffSigDataUrl: string,
+    individualSigDataUrl: string,
+  ): Buffer {
+    const staffPng = this.dataUrlToPngBuffer(staffSigDataUrl);
+    const indPng = this.dataUrlToPngBuffer(individualSigDataUrl);
+
+    if (!staffPng && !indPng) return docxBuf;
+
+    // NOTE: avoid TS "PizZip as type" by not typing it
+    const zip: any = new (PizZip as any)(docxBuf);
+
+    const docXmlFile = zip.file('word/document.xml');
+    const relsFile = zip.file('word/_rels/document.xml.rels');
+    const ctFile = zip.file('[Content_Types].xml');
+
+    if (!docXmlFile || !relsFile || !ctFile) {
+      return docxBuf; // keep original if structure unexpected
+    }
+
+    let docXml = docXmlFile.asText();
+    let relsXml = relsFile.asText();
+    let ctXml = ctFile.asText();
+
+    // Ensure png content type
+    ctXml = this.ensurePngContentType(ctXml);
+
+    // Compute sizes
+    const cx = this.pxToEmu(220);
+    const cy = this.pxToEmu(70);
+
+    const replacements: Array<{
+      placeholder: string;
+      png: Buffer | null;
+      filename: string;
+    }> = [
+      {
+        placeholder: '{%.StaffSignatureImage%}',
+        png: staffPng,
+        filename: 'sig_staff.png',
+      },
+      {
+        placeholder: '{%.IndividualSignatureImage%}',
+        png: indPng,
+        filename: 'sig_individual.png',
+      },
+    ];
+
+    for (const r of replacements) {
+      if (!r.png) {
+        // if template contains placeholder, remove it so it doesn't print
+        if (docXml.includes(r.placeholder)) {
+          docXml = docXml.replaceAll(r.placeholder, '');
+        }
+        continue;
+      }
+
+      if (!docXml.includes(r.placeholder)) {
+        // fallback: try old keys if someone changed the template
+        // (we still don't want base64 text showing)
+        continue;
+      }
+
+      // Add image file in /word/media/
+      const mediaPath = `word/media/${r.filename}`;
+      zip.file(mediaPath, r.png);
+
+      // Add relationship
+      const next = this.nextRelId(relsXml);
+      const rId = `rId${next}`;
+      const relTag = `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${r.filename}"/>`;
+
+      if (relsXml.includes('</Relationships>')) {
+        relsXml = relsXml.replace(
+          '</Relationships>',
+          `${relTag}</Relationships>`,
+        );
+      } else {
+        // if malformed, skip injection
+        continue;
+      }
+
+      // Build drawing xml and replace placeholder.
+      // IMPORTANT: placeholder should be in a single run in template for perfect layout.
+      const drawing = this.buildDrawingXml(rId, r.filename, cx, cy);
+
+      docXml = docXml.replaceAll(r.placeholder, drawing);
+    }
+
+    // Write back
+    zip.file('word/document.xml', docXml);
+    zip.file('word/_rels/document.xml.rels', relsXml);
+    zip.file('[Content_Types].xml', ctXml);
+
+    const out: Buffer = zip.generate({ type: 'nodebuffer' });
+    return out;
+  }
+
+  // -----------------------------
   // DB autofill: Individual & MA
   // -----------------------------
   private async getIndividualAutofill(individualId?: string | null): Promise<{
@@ -191,6 +417,7 @@ export class FileReportsService {
       .join(', ')
       .replace(', ,', ',')
       .trim();
+
     const address2Line = addr2
       ? cityLine
         ? `${addr2} • ${cityLine}`
@@ -247,6 +474,9 @@ export class FileReportsService {
 
     // ✅ DB autofill (Outcome from ISP/BSP)
     const outcomeAuto = await this.getOutcomeAutofill(dn.individualId ?? null);
+
+    // ✅ Signature dataUrls (for WEB Preview + DOCX injection)
+    const sig = this.extractSignatureDataUrls(payload);
 
     // ✅ Meals
     const meals = payload.meals || payload.Meals || {};
@@ -392,16 +622,12 @@ export class FileReportsService {
       payload.patientMA || payload.ma || payload.individualMa || auto.ma || '',
     );
 
-    // ✅ Signatures: docxtemplater cannot embed image; use "Signed" marker
-    const staffSigned =
-      payload.dspSignature || payload.staffSignature ? 'Signed' : '';
-    const individualSigned =
-      payload.individualSignature || payload.clientSignature ? 'Signed' : '';
+    // ✅ Keep old "Signed" markers (not used for image, but keep for compatibility)
+    const staffSigned = sig.staffSigDataUrl ? 'Signed' : '';
+    const individualSigned = sig.individualSigDataUrl ? 'Signed' : '';
 
-    // If you ever want different mapping staff vs individual later:
-    // right now keys are same to keep preview == DOC/PDF.
-    // reportType is kept for future extension without breaking API.
-    const _rt = reportType; // keep for readability & future branching
+    // keep for future branching without breaking API
+    const _rt = reportType;
 
     return {
       ServiceType: this.safeStr(dn.serviceName || dn.serviceCode || ''),
@@ -517,8 +743,17 @@ export class FileReportsService {
           '',
       ),
 
+      // Old compatibility markers
       STAFF_SIGNATURE: this.safeStr(staffSigned),
       INDIVIDUAL_SIGNATURE: this.safeStr(individualSigned),
+
+      // ✅ NEW: used by WEB Preview <img/> and DOCX injection
+      StaffSignatureDataUrl: this.safeStr(sig.staffSigDataUrl),
+      IndividualSignatureDataUrl: this.safeStr(sig.individualSigDataUrl),
+
+      // (Optional) also provide raw placeholders keys if template expects exactly these:
+      // StaffSignatureImage: '',
+      // IndividualSignatureImage: '',
     };
   }
 
@@ -549,7 +784,7 @@ export class FileReportsService {
     });
 
     // DOC/PDF generation uses same mapping as preview (staff keys)
-    const data = await this.buildTemplateData(dn, 'staff');
+    const data: any = await this.buildTemplateData(dn, 'staff');
 
     try {
       doc.render(data);
@@ -559,7 +794,18 @@ export class FileReportsService {
       throw new Error(`Docx template render failed: ${msg}`);
     }
 
-    return doc.getZip().generate({ type: 'nodebuffer' });
+    // 1) Generate base docx
+    let out = doc.getZip().generate({ type: 'nodebuffer' }) as Buffer;
+
+    // 2) Inject signatures into placeholders inside docx (if template uses {%. ... %})
+    // This prevents base64 text being printed.
+    out = this.injectSignatureImagesIntoDocx(
+      out,
+      this.safeStr(data?.StaffSignatureDataUrl || ''),
+      this.safeStr(data?.IndividualSignatureDataUrl || ''),
+    );
+
+    return out;
   }
 
   async generateStaffDocx(dailyNoteId: string): Promise<string> {
@@ -609,7 +855,6 @@ export class FileReportsService {
       process.env.SOFFICE_PATH ||
       process.env.LIBREOFFICE_PATH ||
       process.env.LIBRE_OFFICE_PATH;
-
     if (envPath && fs.existsSync(envPath)) return envPath;
 
     const winCandidates = [
@@ -619,7 +864,6 @@ export class FileReportsService {
     for (const p of winCandidates) {
       if (fs.existsSync(p)) return p;
     }
-
     return 'soffice';
   }
 
@@ -759,7 +1003,6 @@ export class FileReportsService {
     await fs.ensureDir(baseDir);
 
     const absPdfPath = path.join(baseDir, 'staff.pdf');
-
     let docxAbs: string | null = this.fromDbPath(dn.staffReportDocPath ?? null);
 
     try {
@@ -811,7 +1054,6 @@ export class FileReportsService {
     await fs.ensureDir(baseDir);
 
     const absPdfPath = path.join(baseDir, 'individual.pdf');
-
     let docxAbs: string | null = this.fromDbPath(
       dn.individualReportDocPath ?? null,
     );
