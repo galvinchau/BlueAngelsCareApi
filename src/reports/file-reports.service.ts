@@ -361,6 +361,12 @@ export class FileReportsService {
       if (/^word\/footer\d+\.xml$/.test(name) && zip.file(name)) addPart(name);
     }
 
+    // 🔥 NEW: scan drawings (textbox / shapes)
+    for (const name of Object.keys(zip.files || {})) {
+      if (/^word\/drawings\/.+\.xml$/.test(name) && zip.file(name)) {
+        addPart(name);
+      }
+    }
     if (xmlParts.length === 0) return docxBuf;
 
     // Ensure png content type if we will add images
