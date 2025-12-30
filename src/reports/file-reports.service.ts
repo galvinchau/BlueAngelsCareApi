@@ -165,10 +165,11 @@ export class FileReportsService {
     // already HH:mm
     if (/^\d{1,2}:\d{2}$/.test(s)) {
       const mm = this.parseHHmmToMinutes(s);
-      return mm === null ? '' : s.padStart(5, '0'); // "7:05" -> "07:05"
+      if (mm === null) return '';
+      return s.length === 4 ? `0${s}` : s; // "7:05" => "07:05"
     }
 
-    // ISO-like (contains T)
+    // ISO-like
     if (s.includes('T')) {
       const dt = DateTime.fromISO(s, { setZone: true }).setZone(TZ);
       if (!dt.isValid) return '';
@@ -192,9 +193,6 @@ export class FileReportsService {
   } {
     const p = payload || {};
 
-    // Mobile payload keys we saw:
-    // - dspSignature: "data:image/png;base64,..."
-    // - individualSignature: "data:image/png;base64,..."
     const staff =
       p.dspSignature ||
       p.staffSignature ||
@@ -235,7 +233,6 @@ export class FileReportsService {
       return ctXml;
     }
 
-    // Add before closing </Types>
     const insert = '<Default Extension="png" ContentType="image/png"/>';
     if (ctXml.includes('</Types>')) {
       return ctXml.replace('</Types>', `${insert}</Types>`);
@@ -319,23 +316,22 @@ export class FileReportsService {
     placeholder: string,
     replacementRunXml: string,
   ): string {
-    // Direct replace if not split
     if (docXml.includes(placeholder)) {
       return docXml.replaceAll(placeholder, replacementRunXml);
     }
-    // Split across runs
     const re = this.buildSplitWTRegex(placeholder);
     return docXml.replace(re, replacementRunXml);
   }
 
   /**
-   * Inject signature PNG images into DOCX by replacing placeholders:
-   * Supports multiple placeholder variants:
-   * - {%StaffSignatureImage%} / {%.StaffSignatureImage%}
-   * - {%IndividualSignatureImage%} / {%.IndividualSignatureImage%}
-   * - {{StaffSignatureImage}} / {{IndividualSignatureImage}}  (if template was changed)
+   * ✅ Inject signature PNG images into DOCX by replacing placeholders across:
+   * - word/document.xml
+   * - word/header*.xml
+   * - word/footer*.xml
    *
-   * This avoids dumping base64 text into the document.
+   * Template placeholders (as confirmed):
+   * - {%StaffSignatureImage%}
+   * - {%IndividualSignatureImage%}
    */
   private injectSignatureImagesIntoDocx(
     docxBuf: Buffer,
@@ -345,45 +341,101 @@ export class FileReportsService {
     const staffPng = this.dataUrlToPngBuffer(staffSigDataUrl);
     const indPng = this.dataUrlToPngBuffer(individualSigDataUrl);
 
-    // Even if no PNG, we still want to remove placeholders to avoid printing tags/base64.
     const zip: any = new (PizZip as any)(docxBuf);
 
-    const docXmlFile = zip.file('word/document.xml');
-    const relsFile = zip.file('word/_rels/document.xml.rels');
-    const ctFile = zip.file('[Content_Types].xml');
+    // Collect possible XML parts that can contain placeholders
+    const xmlParts: Array<{ xmlPath: string; relsPath: string }> = [];
 
-    if (!docXmlFile || !relsFile || !ctFile) {
-      return docxBuf;
+    const addPart = (xmlPath: string) => {
+      const relsPath = xmlPath.replace(
+        /^word\/(.+)\.xml$/,
+        'word/_rels/$1.xml.rels',
+      );
+      xmlParts.push({ xmlPath, relsPath });
+    };
+
+    if (zip.file('word/document.xml')) addPart('word/document.xml');
+
+    for (const name of Object.keys(zip.files || {})) {
+      if (/^word\/header\d+\.xml$/.test(name) && zip.file(name)) addPart(name);
+      if (/^word\/footer\d+\.xml$/.test(name) && zip.file(name)) addPart(name);
     }
 
-    let docXml = docXmlFile.asText();
-    let relsXml = relsFile.asText();
-    let ctXml = ctFile.asText();
+    if (xmlParts.length === 0) return docxBuf;
 
     // Ensure png content type if we will add images
-    if (staffPng || indPng) {
+    const ctFile = zip.file('[Content_Types].xml');
+    if (ctFile && (staffPng || indPng)) {
+      let ctXml = ctFile.asText();
       ctXml = this.ensurePngContentType(ctXml);
+      zip.file('[Content_Types].xml', ctXml);
     }
 
-    const cx = this.pzToEmuSafe(220);
-    const cy = this.pzToEmuSafe(70);
+    const cx = this.pxToEmu(220);
+    const cy = this.pxToEmu(70);
 
-    const replaceOne = (
+    const staffPlaceholders = [
+      '{%StaffSignatureImage%}',
+      '{%.StaffSignatureImage%}',
+      '{{StaffSignatureImage}}',
+      '{{StaffSignatureDataUrl}}',
+      '{%StaffSignatureDataUrl%}',
+    ];
+
+    const indPlaceholders = [
+      '{%IndividualSignatureImage%}',
+      '{%.IndividualSignatureImage%}',
+      '{{IndividualSignatureImage}}',
+      '{{IndividualSignatureDataUrl}}',
+      '{%IndividualSignatureDataUrl%}',
+    ];
+
+    const ensureRelsXml = (relsPath: string): string => {
+      const f = zip.file(relsPath);
+      if (f) return f.asText();
+      return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'
+      );
+    };
+
+    const writeRelsXml = (relsPath: string, relsXml: string) => {
+      zip.file(relsPath, relsXml);
+    };
+
+    const replaceInOneXmlPart = (
+      xmlPath: string,
+      relsPath: string,
       png: Buffer | null,
       filename: string,
       placeholders: string[],
     ) => {
-      // If no image, remove placeholders so tags don't print
+      const xmlFile = zip.file(xmlPath);
+      if (!xmlFile) return;
+
+      let xml = xmlFile.asText();
+
+      const hasPlaceholder =
+        placeholders.some((ph) => xml.includes(ph)) ||
+        placeholders.some((ph) => this.buildSplitWTRegex(ph).test(xml));
+
+      if (!hasPlaceholder) return;
+
+      // If no image, remove placeholders so tags never print
       if (!png) {
         for (const ph of placeholders) {
-          docXml = this.replacePlaceholderInDocXml(docXml, ph, '');
+          xml = this.replacePlaceholderInDocXml(xml, ph, '');
         }
+        zip.file(xmlPath, xml);
         return;
       }
 
       // Add image file in /word/media/
       const mediaPath = `word/media/${filename}`;
       zip.file(mediaPath, png);
+
+      // Ensure rels exists
+      let relsXml = ensureRelsXml(relsPath);
 
       // Add relationship
       const next = this.nextRelId(relsXml);
@@ -396,65 +448,44 @@ export class FileReportsService {
           `${relTag}</Relationships>`,
         );
       } else {
-        // malformed, just remove placeholders to avoid printing tags
+        // malformed: remove placeholders to avoid printing tags
         for (const ph of placeholders) {
-          docXml = this.replacePlaceholderInDocXml(docXml, ph, '');
+          xml = this.replacePlaceholderInDocXml(xml, ph, '');
         }
+        zip.file(xmlPath, xml);
         return;
       }
 
       const drawing = this.buildDrawingXml(rId, filename, cx, cy);
       const runXml = `<w:r>${drawing}</w:r>`;
 
-      let replacedAny = false;
       for (const ph of placeholders) {
-        const before = docXml;
-        docXml = this.replacePlaceholderInDocXml(docXml, ph, runXml);
-        if (docXml !== before) replacedAny = true;
+        xml = this.replacePlaceholderInDocXml(xml, ph, runXml);
       }
 
-      // If nothing matched, do nothing (but do NOT inject base64 text anywhere)
-      if (!replacedAny) {
-        // no-op
-      }
+      zip.file(xmlPath, xml);
+      writeRelsXml(relsPath, relsXml);
     };
 
-    // Helper placeholders (support old + dot-variant + curly)
-    const staffPlaceholders = [
-      '{%StaffSignatureImage%}',
-      '{%.StaffSignatureImage%}',
-      '{{StaffSignatureImage}}',
-      '{{StaffSignatureImage%}}', // in case someone messed up
-      '{%StaffSignatureDataUrl%}',
-      '{{StaffSignatureDataUrl}}',
-    ];
+    // Apply on all collected parts
+    for (const part of xmlParts) {
+      replaceInOneXmlPart(
+        part.xmlPath,
+        part.relsPath,
+        staffPng,
+        'sig_staff.png',
+        staffPlaceholders,
+      );
+      replaceInOneXmlPart(
+        part.xmlPath,
+        part.relsPath,
+        indPng,
+        'sig_individual.png',
+        indPlaceholders,
+      );
+    }
 
-    const indPlaceholders = [
-      '{%IndividualSignatureImage%}',
-      '{%.IndividualSignatureImage%}',
-      '{{IndividualSignatureImage}}',
-      '{%IndividualSignatureDataUrl%}',
-      '{{IndividualSignatureDataUrl}}',
-    ];
-
-    replaceOne(staffPng, 'sig_staff.png', staffPlaceholders);
-    replaceOne(indPng, 'sig_individual.png', indPlaceholders);
-
-    // Write back
-    zip.file('word/document.xml', docXml);
-    zip.file('word/_rels/document.xml.rels', relsXml);
-    zip.file('[Content_Types].xml', ctXml);
-
-    const out: Buffer = zip.generate({ type: 'nodebuffer' });
-    return out;
-  }
-
-  // keep a safe wrapper name (typo-proof)
-  private pzToEmu(px: number): number {
-    return this.pxToEmu(px);
-  }
-  private pzToEmuSafe(px: number): number {
-    return this.pxToEmu(px);
+    return zip.generate({ type: 'nodebuffer' }) as Buffer;
   }
 
   // -----------------------------
@@ -858,7 +889,7 @@ export class FileReportsService {
     // Build data (includes signature dataUrls for preview)
     const data: any = await this.buildTemplateData(dn, 'staff');
 
-    // ✅ IMPORTANT: Prevent base64 from ever printing in DOCX if template uses {{StaffSignatureDataUrl}} etc.
+    // ✅ IMPORTANT: prevent base64 from printing if template mistakenly uses {{StaffSignatureDataUrl}}
     const sigStaff = this.safeStr(data?.StaffSignatureDataUrl || '');
     const sigInd = this.safeStr(data?.IndividualSignatureDataUrl || '');
 
@@ -881,8 +912,7 @@ export class FileReportsService {
     // 1) Generate base docx
     let out = doc.getZip().generate({ type: 'nodebuffer' }) as Buffer;
 
-    // 2) Inject signatures into placeholders inside docx
-    // Supports {%...%} placeholders even if split across <w:t> nodes
+    // 2) Inject signatures into placeholders (document/header/footer)
     out = this.injectSignatureImagesIntoDocx(out, sigStaff, sigInd);
 
     return out;
