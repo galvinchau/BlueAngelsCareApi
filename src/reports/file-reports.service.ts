@@ -317,6 +317,64 @@ export class FileReportsService {
     return xml.replace(re, replacement);
   }
 
+  // ✅ NEW: Replace split mustache token "{{Name}}" even if Word splits across runs.
+  private replaceSplitMustacheToken(
+    xml: string,
+    name: string,
+    replacement: string,
+  ): string {
+    const n = this.escapeRegExp(name);
+    // Matches: <w:t>{{</w:t> ... <w:t>Name</w:t> ... <w:t>}}</w:t>
+    const re = new RegExp(
+      `<w:t[^>]*>\\{\\{<\\/w:t>[\\s\\S]*?<w:t[^>]*>${n}<\\/w:t>[\\s\\S]*?<w:t[^>]*>\\}\\}<\\/w:t>`,
+      'g',
+    );
+    return xml.replace(re, replacement);
+  }
+
+  // ✅ NEW: Patch {{OverReason}} / {{ShortReason}} across ALL xml parts (document, headers, drawings, textboxes).
+  private patchMustacheTokensIntoDocx(
+    docxBuf: Buffer,
+    replacements: Record<string, string>,
+  ): Buffer {
+    const zip: any = new (PizZip as any)(docxBuf);
+
+    const xmlNames = Object.keys(zip.files || {}).filter(
+      (n) => n.startsWith('word/') && n.endsWith('.xml') && !!zip.file(n),
+    );
+
+    for (const xmlPath of xmlNames) {
+      const xmlFile = zip.file(xmlPath);
+      if (!xmlFile) continue;
+
+      let xml = xmlFile.asText();
+      let changed = false;
+
+      for (const [key, valueRaw] of Object.entries(replacements)) {
+        const value = this.safeStr(valueRaw ?? '');
+        const token = `{{${key}}}`;
+
+        const before = xml;
+
+        // contiguous token
+        if (xml.includes(token)) {
+          xml = xml.split(token).join(value);
+        }
+
+        // split token across runs
+        xml = this.replaceSplitMustacheToken(xml, key, value);
+
+        if (xml !== before) changed = true;
+      }
+
+      if (changed) {
+        zip.file(xmlPath, xml);
+      }
+    }
+
+    return zip.generate({ type: 'nodebuffer' }) as Buffer;
+  }
+
   /**
    * Inject signature PNG images into DOCX by replacing placeholders:
    * - {%StaffSignatureImage%} or split as "{%" + "StaffSignatureImage" + "%}"
@@ -732,10 +790,15 @@ export class FileReportsService {
       Mileage: this.safeStr(mileage),
 
       OverReason: this.safeStr(
-        payload.overReason ?? payload.overReasonText ?? '',
+        payload.overReason ??
+          payload.overReasonText ??
+          payload.varianceReason ?? // ✅ support mobile field
+          '',
       ),
       CancelReason: this.safeStr(dn.cancelReason ?? payload.cancelReason ?? ''),
-      ShortReason: this.safeStr(payload.shortReason ?? ''),
+      ShortReason: this.safeStr(
+        payload.shortReason ?? payload.varianceReason ?? '',
+      ),
 
       // ✅ Outcome (payload first, fallback to ISP/BSP)
       OutcomeText: this.safeStr(
@@ -869,6 +932,12 @@ export class FileReportsService {
 
     // 1) Generate base docx
     let out = doc.getZip().generate({ type: 'nodebuffer' }) as Buffer;
+
+    // ✅ NEW: patch mustache tokens across ALL xml parts (textboxes/shapes)
+    out = this.patchMustacheTokensIntoDocx(out, {
+      OverReason: this.safeStr(data?.OverReason || ''),
+      ShortReason: this.safeStr(data?.ShortReason || ''),
+    });
 
     // 2) Inject signatures into placeholders inside docx (supports split tokens)
     out = this.injectSignatureImagesIntoDocx(
