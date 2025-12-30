@@ -354,11 +354,11 @@ export class FileReportsService {
       xmlParts.push({ xmlPath, relsPath });
     };
 
-    if (zip.file('word/document.xml')) addPart('word/document.xml');
-
+    // ✅ Scan ALL word/*.xml parts (document, header, footer, drawings, etc.)
     for (const name of Object.keys(zip.files || {})) {
-      if (/^word\/header\d+\.xml$/.test(name) && zip.file(name)) addPart(name);
-      if (/^word\/footer\d+\.xml$/.test(name) && zip.file(name)) addPart(name);
+      if (name.startsWith('word/') && name.endsWith('.xml') && zip.file(name)) {
+        addPart(name);
+      }
     }
 
     // 🔥 NEW: scan drawings (textbox / shapes)
