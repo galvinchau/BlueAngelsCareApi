@@ -7,51 +7,58 @@ import {
 } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
 import { PrismaService } from '../../prisma/prisma.service';
+import * as crypto from 'crypto';
 
-const MAIL_HOST = 'smtp.gmail.com';
-const MAIL_PORT = 587;
-const MAIL_USER = 'payroll.blueangelscare@gmail.com';
-const MAIL_PASS = 'okoohnneznacdqut'; // App Password
+const MAIL_HOST = process.env.MOBILE_MAIL_HOST || 'smtp.gmail.com';
+const MAIL_PORT = Number(process.env.MOBILE_MAIL_PORT || 587);
+const MAIL_USER =
+  process.env.MOBILE_MAIL_USER || 'payroll.blueangelscare@gmail.com';
+const MAIL_PASS = process.env.MOBILE_MAIL_PASS || 'okoohnneznacdqut'; // fallback for current setup
 const MAIL_FROM =
+  process.env.MOBILE_MAIL_FROM ||
   '"Blue Angels Care Mobile" <payroll.blueangelscare@gmail.com>';
 
 const OTP_EXPIRES_MINUTES = 10;
+
+// ✅ 90 days remember-login
+const REFRESH_TOKEN_DAYS = 90;
+
+function addDays(date: Date, days: number) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+function sha256Hex(input: string) {
+  return crypto.createHash('sha256').update(input).digest('hex');
+}
+
+function genRefreshTokenPlain(): string {
+  // 48 bytes => long enough, URL-safe base64
+  return crypto.randomBytes(48).toString('base64url');
+}
 
 @Injectable()
 export class MobileAuthService {
   constructor(private readonly prisma: PrismaService) {}
 
-  // Nodemailer transporter dùng Gmail
   private transporter = nodemailer.createTransport({
     host: MAIL_HOST,
     port: MAIL_PORT,
-    secure: false, // dùng STARTTLS trên port 587
-    auth: {
-      user: MAIL_USER,
-      pass: MAIL_PASS,
-    },
+    secure: false,
+    auth: { user: MAIL_USER, pass: MAIL_PASS },
   });
 
-  // Tạo code 4 số, ví dụ 1234
   private generateOtpCode(): string {
     return Math.floor(1000 + Math.random() * 9000).toString();
   }
 
-  /**
-   * Gửi OTP login tới email DSP
-   */
   async requestOtp(email: string) {
-    const trimmedEmail = email.trim().toLowerCase();
-    if (!trimmedEmail) {
-      throw new BadRequestException('Email is required');
-    }
+    const trimmedEmail = String(email || '')
+      .trim()
+      .toLowerCase();
+    if (!trimmedEmail) throw new BadRequestException('Email is required');
 
-    // 1. Tìm employee có email + isMobileUser = true
     const staff = await this.prisma.employee.findFirst({
-      where: {
-        email: trimmedEmail,
-        isMobileUser: true,
-      },
+      where: { email: trimmedEmail, isMobileUser: true },
     });
 
     if (!staff) {
@@ -60,7 +67,6 @@ export class MobileAuthService {
       );
     }
 
-    // 2. Tạo OTP + lưu vào bảng MobileLoginOtp
     const code = this.generateOtpCode();
     const now = new Date();
     const expiresAt = new Date(now.getTime() + OTP_EXPIRES_MINUTES * 60 * 1000);
@@ -75,7 +81,6 @@ export class MobileAuthService {
       },
     });
 
-    // 3. Gửi email
     const displayName =
       `${staff.firstName ?? ''} ${staff.lastName ?? ''}`.trim();
 
@@ -109,11 +114,13 @@ export class MobileAuthService {
   }
 
   /**
-   * Xác thực OTP login
+   * ✅ Verify OTP -> issue refresh token (90 days)
    */
   async verifyOtp(email: string, code: string) {
-    const trimmedEmail = email.trim().toLowerCase();
-    const trimmedCode = code.trim();
+    const trimmedEmail = String(email || '')
+      .trim()
+      .toLowerCase();
+    const trimmedCode = String(code || '').trim();
 
     if (!trimmedEmail || !trimmedCode) {
       throw new BadRequestException('Email and code are required');
@@ -121,47 +128,140 @@ export class MobileAuthService {
 
     const now = new Date();
 
-    // 1. Tìm OTP còn hạn, chưa dùng
     const otp = await this.prisma.mobileLoginOtp.findFirst({
       where: {
         email: trimmedEmail,
         code: trimmedCode,
         usedAt: null,
-        expiresAt: {
-          gt: now,
-        },
+        expiresAt: { gt: now },
       },
-      orderBy: {
-        createdAt: 'desc',
-      },
+      orderBy: { createdAt: 'desc' },
     });
 
-    if (!otp) {
-      throw new BadRequestException('Invalid or expired code');
-    }
+    if (!otp) throw new BadRequestException('Invalid or expired code');
 
-    // 2. Lấy lại thông tin nhân viên
     const staff = await this.prisma.employee.findUnique({
       where: { id: otp.staffId },
     });
+    if (!staff) throw new NotFoundException('Employee not found');
 
-    if (!staff) {
-      throw new NotFoundException('Employee not found');
-    }
-
-    // 3. Đánh dấu OTP đã dùng
     await this.prisma.mobileLoginOtp.update({
       where: { id: otp.id },
       data: { usedAt: now },
     });
 
-    // 4. Trả về info cho Mobile (staffId, staffName, email)
+    // ✅ Create refresh token row
+    const refreshToken = genRefreshTokenPlain();
+    const tokenHash = sha256Hex(refreshToken);
+    const expiresAt = addDays(now, REFRESH_TOKEN_DAYS);
+
+    // Optional: revoke old tokens for this staff (clean-up)
+    await this.prisma.mobileRefreshToken.updateMany({
+      where: {
+        staffId: staff.id,
+        revokedAt: null,
+      },
+      data: { revokedAt: now },
+    });
+
+    await this.prisma.mobileRefreshToken.create({
+      data: {
+        staffId: staff.id,
+        email: trimmedEmail,
+        tokenHash,
+        expiresAt,
+      },
+    });
+
     const staffName = `${staff.firstName ?? ''} ${staff.lastName ?? ''}`.trim();
 
     return {
       staffId: staff.id,
       staffName,
       email: trimmedEmail,
+
+      // ✅ return remember token to device
+      refreshToken,
+      refreshExpiresAt: expiresAt.toISOString(),
     };
+  }
+
+  /**
+   * ✅ Refresh session without OTP
+   * - validate tokenHash exists, not revoked, not expired
+   * - rotate token (best practice)
+   */
+  async refreshSession(refreshToken: string) {
+    const token = String(refreshToken || '').trim();
+    if (!token) throw new BadRequestException('refreshToken is required');
+
+    const now = new Date();
+    const tokenHash = sha256Hex(token);
+
+    const row = await this.prisma.mobileRefreshToken.findUnique({
+      where: { tokenHash },
+    });
+
+    if (!row || row.revokedAt) {
+      throw new BadRequestException('Invalid refresh token');
+    }
+    if (row.expiresAt <= now) {
+      // expire -> force OTP
+      throw new BadRequestException('Refresh token expired');
+    }
+
+    const staff = await this.prisma.employee.findUnique({
+      where: { id: row.staffId },
+    });
+    if (!staff) throw new NotFoundException('Employee not found');
+
+    // ✅ rotate token + extend expiry to 90 days from now
+    const newToken = genRefreshTokenPlain();
+    const newHash = sha256Hex(newToken);
+    const newExpiresAt = addDays(now, REFRESH_TOKEN_DAYS);
+
+    try {
+      await this.prisma.mobileRefreshToken.update({
+        where: { tokenHash },
+        data: {
+          tokenHash: newHash,
+          expiresAt: newExpiresAt,
+          revokedAt: null,
+        },
+      });
+    } catch (err) {
+      // If unique collision (extremely unlikely), fail safe
+      console.error('[MobileAuthService] refresh rotate failed:', err);
+      throw new InternalServerErrorException('Failed to refresh session');
+    }
+
+    const staffName = `${staff.firstName ?? ''} ${staff.lastName ?? ''}`.trim();
+
+    return {
+      staffId: staff.id,
+      staffName,
+      email: row.email,
+
+      refreshToken: newToken,
+      refreshExpiresAt: newExpiresAt.toISOString(),
+    };
+  }
+
+  /**
+   * ✅ Logout: revoke refresh token
+   */
+  async logout(refreshToken: string) {
+    const token = String(refreshToken || '').trim();
+    if (!token) throw new BadRequestException('refreshToken is required');
+
+    const now = new Date();
+    const tokenHash = sha256Hex(token);
+
+    await this.prisma.mobileRefreshToken.updateMany({
+      where: { tokenHash, revokedAt: null },
+      data: { revokedAt: now },
+    });
+
+    return { ok: true };
   }
 }

@@ -195,7 +195,10 @@ model Employee {
   // Supervisors cho Admin Users
   userSupervisors UserSupervisor[]
 
-  isMobileUser Boolean @default(false)  // 👈 THÊM DÒNG NÀY
+  isMobileUser Boolean @default(false) // 👈 THÊM DÒNG NÀY
+
+  // ✅ NEW: refresh tokens for mobile "remember device"
+  mobileRefreshTokens MobileRefreshToken[]
 }
 
 /**
@@ -804,7 +807,7 @@ model MedicationIncident {
 }
 
 model MobileLoginOtp {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   email     String
   code      String
   staffId   String
@@ -815,4 +818,29 @@ model MobileLoginOtp {
 
   @@index([email])
   @@index([email, code])
+}
+
+//
+// ✅ NEW: Mobile Refresh Tokens (Remember device for 90 days)
+// - Store hash only (tokenHash)
+// - staffId links to Employee.id (DSP)
+// - expiresAt enforces 90-day re-verify requirement
+//
+model MobileRefreshToken {
+  id        String @id @default(cuid())
+  staffId   String
+  email     String
+  tokenHash String
+
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  staff Employee @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@unique([tokenHash])
+  @@index([staffId])
+  @@index([email])
+  @@index([expiresAt])
+  @@index([revokedAt])
 }
