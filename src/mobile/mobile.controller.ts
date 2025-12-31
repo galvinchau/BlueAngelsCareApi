@@ -2,7 +2,10 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 
 // Import type-only để tránh lỗi TS1272
-import type { MobileDailyNotePayload } from './mobile.service';
+import type {
+  MobileDailyNotePayload,
+  MobileIndividualLite,
+} from './mobile.service';
 // Import class service như bình thường
 import { MobileService } from './mobile.service';
 
@@ -19,6 +22,20 @@ export class MobileController {
     @Query('date') date: string,
   ) {
     return this.mobileService.getTodayShifts(staffId, date);
+  }
+
+  /**
+   * ✅ NEW
+   * GET /mobile/individuals?search=...
+   * Search by: Individual ID, First name, Last name, Full name
+   */
+  @Get('individuals')
+  async searchIndividuals(
+    @Query('search') search?: string,
+  ): Promise<{ items: MobileIndividualLite[] }> {
+    const q = String(search ?? '').trim();
+    const items = await this.mobileService.searchIndividuals(q);
+    return { items };
   }
 
   /**

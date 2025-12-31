@@ -25,6 +25,19 @@ import { GoogleReportsService } from '../reports/google-reports.service';
 export type ShiftStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED';
 
 /**
+ * ✅ Mobile Individual Lite DTO (for Clients screen)
+ * NOTE: Schema currently doesn't expose Medicaid field in Individual, so maNumber is null for now.
+ */
+export interface MobileIndividualLite {
+  id: string;
+  fullName: string;
+  maNumber?: string | null;
+  address1?: string | null;
+  address2?: string | null;
+  phone?: string | null;
+}
+
+/**
  * Mobile shift DTO
  */
 export interface MobileShift {
@@ -168,7 +181,7 @@ function minutesToUnits(mins: number): number {
 }
 
 /**
- * Helper: format address
+ * Helper: format address (full line used in shifts)
  */
 function formatAddress(ind: Individual): string {
   const parts = [
@@ -181,6 +194,37 @@ function formatAddress(ind: Individual): string {
     .filter((p) => !!p);
 
   return parts.join(', ');
+}
+
+/**
+ * ✅ Helper: for Clients screen (address1 + address2)
+ */
+function formatAddressLines(ind: Individual): {
+  address1: string | null;
+  address2: string | null;
+} {
+  const a1 = (ind.address1 ?? '').trim();
+  const city = (ind.city ?? '').trim();
+  const state = (ind.state ?? '').trim();
+  const zip = (ind.zip ?? '').trim();
+
+  const a2Parts = [city, state].filter(Boolean);
+  let a2 = a2Parts.join(', ');
+  if (zip) a2 = a2 ? `${a2} ${zip}` : zip;
+
+  return {
+    address1: a1 || null,
+    address2: a2 || null,
+  };
+}
+
+/**
+ * ✅ Helper: normalize query
+ */
+function normalizeQ(q: string): string {
+  return String(q || '')
+    .trim()
+    .replace(/\s+/g, ' ');
 }
 
 /**
@@ -274,6 +318,75 @@ export class MobileService {
     private readonly prisma: PrismaService,
     private readonly reportsService: GoogleReportsService,
   ) {}
+
+  // =====================================================
+  // ✅ NEW: Search Individuals for mobile Clients screen
+  // =====================================================
+  async searchIndividuals(search: string): Promise<MobileIndividualLite[]> {
+    const q = normalizeQ(search);
+    if (!q) return [];
+
+    const tokens = q.split(' ').filter(Boolean);
+
+    // Name matching:
+    // - 1 token: firstName OR lastName contains token
+    // - 2+ tokens: AND across tokens, each token can match firstName OR lastName (order independent)
+    const nameWhere =
+      tokens.length >= 2
+        ? {
+            AND: tokens.slice(0, 3).map((t) => ({
+              OR: [
+                { firstName: { contains: t, mode: 'insensitive' as const } },
+                { lastName: { contains: t, mode: 'insensitive' as const } },
+              ],
+            })),
+          }
+        : {
+            OR: [
+              { firstName: { contains: q, mode: 'insensitive' as const } },
+              { lastName: { contains: q, mode: 'insensitive' as const } },
+            ],
+          };
+
+    const rows = await this.prisma.individual.findMany({
+      where: {
+        OR: [
+          // ID exact/contains
+          { id: { equals: q } },
+          { id: { contains: q } },
+
+          // Name logic
+          nameWhere,
+        ],
+      },
+      take: 25,
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        address1: true,
+        city: true,
+        state: true,
+        zip: true,
+        // NOTE: Do NOT select non-existing fields to avoid Prisma/TS errors.
+      },
+    });
+
+    return rows.map((ind) => {
+      const fullName = `${ind.firstName ?? ''} ${ind.lastName ?? ''}`.trim();
+      const addr = formatAddressLines(ind as unknown as Individual);
+
+      return {
+        id: ind.id,
+        fullName,
+        maNumber: null, // ✅ will map when schema has Medicaid field
+        address1: addr.address1,
+        address2: addr.address2,
+        phone: null, // ✅ will map when schema has phone field
+      };
+    });
+  }
 
   // =====================================================
   // Today shifts for mobile
@@ -420,9 +533,6 @@ export class MobileService {
         // legacy fields
         staffReportFileId: null,
         individualReportFileId: null,
-
-        // NOTE: If your schema uses direct-download paths (staffReportPdfPath, etc.)
-        // do NOT set any unknown fields here.
       } as any,
     });
 
