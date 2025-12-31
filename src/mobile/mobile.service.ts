@@ -312,6 +312,97 @@ function mapShiftToMobileShift(params: {
   };
 }
 
+/**
+ * ✅ NEW Helper: map ScheduleShift -> MobileShift for Client Detail
+ * - If staffId provided: use staff-specific visit times/status.
+ * - If staffId not provided: use ANY visit times for the day (best-effort), status from shift + open visit.
+ */
+function mapShiftToMobileShiftForClientDetail(params: {
+  shift: ScheduleShift & {
+    individual: Individual;
+    service: Service;
+    visits: Visit[];
+  };
+  date: string; // YYYY-MM-DD (America/New_York)
+  staffId?: string;
+}): MobileShift {
+  const { shift, date, staffId } = params;
+  const individual = shift.individual;
+  const service = shift.service;
+  const visits = shift.visits ?? [];
+
+  // Base status from shift
+  let status: ShiftStatus = 'NOT_STARTED';
+  switch (shift.status) {
+    case ScheduleStatus.IN_PROGRESS:
+      status = 'IN_PROGRESS';
+      break;
+    case ScheduleStatus.COMPLETED:
+    case ScheduleStatus.NOT_COMPLETED:
+      status = 'COMPLETED';
+      break;
+  }
+
+  // Filter visits by staff (if given)
+  const visitsFiltered = staffId
+    ? visits.filter((v) => v.dspId === staffId)
+    : visits;
+
+  // Only visits on the same local day (America/New_York)
+  const visitsSameDay = visitsFiltered.filter((v) => {
+    if (!v.checkInAt) return false;
+    const localDateStr = DateTime.fromJSDate(v.checkInAt)
+      .setZone(TZ)
+      .toISODate();
+    return localDateStr === date;
+  });
+
+  let visitStart: string | null = null;
+  let visitEnd: string | null = null;
+
+  if (visitsSameDay.length > 0) {
+    const sorted = [...visitsSameDay].sort((a, b) =>
+      a.checkInAt < b.checkInAt ? -1 : 1,
+    );
+    const earliest = sorted[0];
+
+    const latest = visitsSameDay.reduce((max, v) => {
+      const vEnd = v.checkOutAt ?? v.checkInAt;
+      const maxEnd = max.checkOutAt ?? max.checkInAt;
+      return vEnd > maxEnd ? v : max;
+    });
+
+    visitStart = formatTimeHHmmInTZ(earliest.checkInAt);
+    visitEnd = formatTimeHHmmInTZ(latest.checkOutAt ?? latest.checkInAt);
+
+    // If any open visit, mark IN_PROGRESS
+    if (visitsSameDay.some((v) => !v.checkOutAt)) status = 'IN_PROGRESS';
+    else status = 'COMPLETED';
+  }
+
+  const scheduleStart = formatTimeHHmmInTZ(shift.plannedStart) ?? '';
+  const scheduleEnd = formatTimeHHmmInTZ(shift.plannedEnd) ?? '';
+
+  return {
+    id: shift.id,
+    date,
+    individualId: individual.id,
+    individualName: `${individual.firstName} ${individual.lastName}`.trim(),
+    individualDob: individual.dob ?? '',
+    individualMa: '',
+    individualAddress: formatAddress(individual),
+    serviceCode: service.serviceCode,
+    serviceName: service.serviceName,
+    location: individual.location ?? '',
+    scheduleStart,
+    scheduleEnd,
+    status,
+    visitStart,
+    visitEnd,
+    outcomeText: null,
+  };
+}
+
 @Injectable()
 export class MobileService {
   constructor(
@@ -424,6 +515,47 @@ export class MobileService {
     return {
       shifts: shifts.map((s) =>
         mapShiftToMobileShift({ shift: s, staffId, date }),
+      ),
+    };
+  }
+
+  // =====================================================
+  // ✅ NEW: Today shifts for a specific Individual (Client detail)
+  // =====================================================
+  async getTodayShiftsForIndividual(
+    individualId: string,
+    date: string,
+    staffId?: string,
+  ): Promise<{ shifts: MobileShift[] }> {
+    const dayStartLocal = DateTime.fromISO(date, { zone: TZ })
+      .startOf('day')
+      .toJSDate();
+    const dayEndLocal = DateTime.fromISO(date, { zone: TZ })
+      .endOf('day')
+      .toJSDate();
+
+    const shifts = await this.prisma.scheduleShift.findMany({
+      where: {
+        scheduleDate: { gte: dayStartLocal, lte: dayEndLocal },
+        individualId,
+      },
+      include: {
+        individual: true,
+        service: true,
+        visits: {
+          where: {
+            checkInAt: { gte: dayStartLocal, lte: dayEndLocal },
+            ...(staffId ? { dspId: staffId } : {}),
+          },
+          orderBy: { checkInAt: 'asc' },
+        },
+      },
+      orderBy: { plannedStart: 'asc' },
+    });
+
+    return {
+      shifts: shifts.map((s) =>
+        mapShiftToMobileShiftForClientDetail({ shift: s, date, staffId }),
       ),
     };
   }

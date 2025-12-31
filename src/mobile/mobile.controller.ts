@@ -6,6 +6,7 @@ import type {
   MobileDailyNotePayload,
   MobileIndividualLite,
 } from './mobile.service';
+
 // Import class service như bình thường
 import { MobileService } from './mobile.service';
 
@@ -25,9 +26,8 @@ export class MobileController {
   }
 
   /**
-   * ✅ NEW
+   * ✅ Search Individuals
    * GET /mobile/individuals?search=...
-   * Search by: Individual ID, First name, Last name, Full name
    */
   @Get('individuals')
   async searchIndividuals(
@@ -36,6 +36,24 @@ export class MobileController {
     const q = String(search ?? '').trim();
     const items = await this.mobileService.searchIndividuals(q);
     return { items };
+  }
+
+  /**
+   * ✅ Today shifts for a specific individual
+   * GET /mobile/individuals/:id/shifts/today?date=YYYY-MM-DD&staffId=...
+   * staffId is optional (if provided, show only that DSP's visits/status)
+   */
+  @Get('individuals/:id/shifts/today')
+  async getTodayShiftsForIndividual(
+    @Param('id') individualId: string,
+    @Query('date') date: string,
+    @Query('staffId') staffId?: string,
+  ) {
+    return this.mobileService.getTodayShiftsForIndividual(
+      individualId,
+      date,
+      staffId,
+    );
   }
 
   /**
@@ -48,7 +66,6 @@ export class MobileController {
 
   /**
    * POST /mobile/shifts/:id/check-in
-   * Body: { staffId: "STAFF_DEMO", clientTime?: "2025-11-21T03:15:04.324Z" }
    */
   @Post('shifts/:id/check-in')
   checkIn(
@@ -61,7 +78,6 @@ export class MobileController {
 
   /**
    * POST /mobile/shifts/:id/check-out
-   * Body: { staffId: "STAFF_DEMO", clientTime?: "2025-11-21T05:55:10.000Z" }
    */
   @Post('shifts/:id/check-out')
   checkOut(
