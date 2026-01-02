@@ -6,7 +6,11 @@
 //  - Google Drive export is gated by env ENABLE_GOOGLE_REPORTS=1
 // ======================================================
 
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   ScheduleStatus,
   VisitSource,
@@ -298,7 +302,7 @@ function mapShiftToMobileShift(params: {
     individualId: individual.id,
     individualName: `${individual.firstName} ${individual.lastName}`.trim(),
     individualDob: individual.dob ?? '',
-    individualMa: '', // (optional: later map from Payer/memberId if you want)
+    individualMa: '',
     individualAddress: formatAddress(individual),
     serviceCode: service.serviceCode,
     serviceName: service.serviceName,
@@ -314,8 +318,6 @@ function mapShiftToMobileShift(params: {
 
 /**
  * ✅ NEW Helper: map ScheduleShift -> MobileShift for Client Detail
- * - If staffId provided: use staff-specific visit times/status.
- * - If staffId not provided: use ANY visit times for the day (best-effort), status from shift + open visit.
  */
 function mapShiftToMobileShiftForClientDetail(params: {
   shift: ScheduleShift & {
@@ -343,12 +345,10 @@ function mapShiftToMobileShiftForClientDetail(params: {
       break;
   }
 
-  // Filter visits by staff (if given)
   const visitsFiltered = staffId
     ? visits.filter((v) => v.dspId === staffId)
     : visits;
 
-  // Only visits on the same local day (America/New_York)
   const visitsSameDay = visitsFiltered.filter((v) => {
     if (!v.checkInAt) return false;
     const localDateStr = DateTime.fromJSDate(v.checkInAt)
@@ -375,7 +375,6 @@ function mapShiftToMobileShiftForClientDetail(params: {
     visitStart = formatTimeHHmmInTZ(earliest.checkInAt);
     visitEnd = formatTimeHHmmInTZ(latest.checkOutAt ?? latest.checkInAt);
 
-    // If any open visit, mark IN_PROGRESS
     if (visitsSameDay.some((v) => !v.checkOutAt)) status = 'IN_PROGRESS';
     else status = 'COMPLETED';
   }
@@ -403,6 +402,21 @@ function mapShiftToMobileShiftForClientDetail(params: {
   };
 }
 
+type StartUnknownVisitInput = {
+  staffId: string;
+  staffName?: string;
+  staffEmail?: string;
+
+  firstName: string;
+  lastName: string;
+
+  medicaidId?: string | null;
+  clientId?: string | null;
+
+  serviceCode?: string; // default COMP
+  clientTime?: string; // ISO from phone optional
+};
+
 @Injectable()
 export class MobileService {
   constructor(
@@ -411,7 +425,140 @@ export class MobileService {
   ) {}
 
   // =====================================================
-  // ✅ NEW: Search Individuals for mobile Clients screen
+  // ✅ Start Unknown Visit (AD-HOC)
+  // - Create ScheduleShift for today (plannedStart=now, plannedEnd=now+60m)
+  // - Create Visit check-in immediately
+  // - Mark shift notes as ADHOC
+  // =====================================================
+  async startUnknownVisit(
+    input: StartUnknownVisitInput,
+  ): Promise<{ shiftId: string }> {
+    const staffId = String(input.staffId || '').trim();
+    const firstName = String(input.firstName || '').trim();
+    const lastName = String(input.lastName || '').trim();
+
+    // ✅ 400 instead of 500
+    if (!staffId) {
+      throw new BadRequestException('Missing staffId');
+    }
+    if (!firstName || !lastName) {
+      throw new BadRequestException('Please enter First Name and Last Name');
+    }
+
+    // 1) Find individual by name (best effort)
+    const individual = await this.findIndividualByName(firstName, lastName);
+
+    // ✅ 404 instead of 500
+    if (!individual) {
+      throw new NotFoundException(
+        `Individual not found: "${firstName} ${lastName}". Please check spelling or search client first.`,
+      );
+    }
+
+    // 2) Choose service (default COMP)
+    const serviceCode = String(input.serviceCode || 'COMP')
+      .trim()
+      .toUpperCase();
+
+    const service = await this.prisma.service.findFirst({
+      where: { serviceCode },
+      select: { id: true, serviceCode: true, serviceName: true },
+    });
+
+    // ✅ 400 instead of 500
+    if (!service) {
+      throw new BadRequestException(`Service not found: ${serviceCode}`);
+    }
+
+    // 3) Determine times (in TZ)
+    const now = input.clientTime
+      ? DateTime.fromISO(input.clientTime, { setZone: true }).setZone(TZ)
+      : DateTime.now().setZone(TZ);
+
+    const plannedStart = now.toJSDate();
+    const plannedEnd = now.plus({ minutes: 60 }).toJSDate();
+    const scheduleDate = now.startOf('day').toJSDate();
+
+    // 4) Create shift + visit in transaction
+    const created = await this.prisma.$transaction(async (tx) => {
+      const shift = await tx.scheduleShift.create({
+        data: {
+          scheduleDate,
+          individualId: individual.id,
+          serviceId: service.id,
+
+          plannedStart,
+          plannedEnd,
+
+          plannedDspId: staffId,
+          actualDspId: staffId,
+
+          status: ScheduleStatus.IN_PROGRESS,
+
+          // ✅ Mark ad-hoc so web can display badge later
+          notes: `ADHOC_UNKNOWN_VISIT | Medicaid:${String(
+            input.medicaidId ?? '',
+          ).trim()} | ClientId:${String(input.clientId ?? '').trim()}`.trim(),
+        } as any,
+        select: { id: true },
+      });
+
+      await tx.visit.create({
+        data: {
+          scheduleShiftId: shift.id,
+          individualId: individual.id,
+          dspId: staffId,
+          serviceId: service.id,
+          checkInAt: plannedStart,
+          source: VisitSource.MOBILE,
+        } as any,
+        select: highlightSelectId(),
+      });
+
+      return { shiftId: shift.id };
+    });
+
+    return { shiftId: created.shiftId };
+  }
+
+  /**
+   * ✅ Helper: find individual by name
+   * Priority:
+   * 1) exact match (case-insensitive)
+   * 2) contains match
+   */
+  private async findIndividualByName(
+    firstName: string,
+    lastName: string,
+  ): Promise<Individual | null> {
+    const fn = firstName.trim();
+    const ln = lastName.trim();
+
+    const exact = await this.prisma.individual.findFirst({
+      where: {
+        AND: [
+          { firstName: { equals: fn, mode: 'insensitive' as const } },
+          { lastName: { equals: ln, mode: 'insensitive' as const } },
+        ],
+      },
+    });
+    if (exact) return exact as unknown as Individual;
+
+    const contains = await this.prisma.individual.findFirst({
+      where: {
+        AND: [
+          { firstName: { contains: fn, mode: 'insensitive' as const } },
+          { lastName: { contains: ln, mode: 'insensitive' as const } },
+        ],
+      },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+    });
+
+    return (contains as unknown as Individual) ?? null;
+  }
+
+  // =====================================================
+  // ✅ Search Individuals for mobile Clients screen
   // =====================================================
   async searchIndividuals(search: string): Promise<MobileIndividualLite[]> {
     const q = normalizeQ(search);
@@ -419,9 +566,6 @@ export class MobileService {
 
     const tokens = q.split(' ').filter(Boolean);
 
-    // Name matching:
-    // - 1 token: firstName OR lastName contains token
-    // - 2+ tokens: AND across tokens, each token can match firstName OR lastName (order independent)
     const nameWhere =
       tokens.length >= 2
         ? {
@@ -441,14 +585,7 @@ export class MobileService {
 
     const rows = await this.prisma.individual.findMany({
       where: {
-        OR: [
-          // ID exact/contains
-          { id: { equals: q } },
-          { id: { contains: q } },
-
-          // Name logic
-          nameWhere,
-        ],
+        OR: [{ id: { equals: q } }, { id: { contains: q } }, nameWhere],
       },
       take: 25,
       orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
@@ -460,7 +597,6 @@ export class MobileService {
         city: true,
         state: true,
         zip: true,
-        // NOTE: Do NOT select non-existing fields to avoid Prisma/TS errors.
       },
     });
 
@@ -471,10 +607,10 @@ export class MobileService {
       return {
         id: ind.id,
         fullName,
-        maNumber: null, // ✅ will map when schema has Medicaid field
+        maNumber: null,
         address1: addr.address1,
         address2: addr.address2,
-        phone: null, // ✅ will map when schema has phone field
+        phone: null,
       };
     });
   }
@@ -520,7 +656,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // ✅ NEW: Today shifts for a specific Individual (Client detail)
+  // Today shifts for a specific Individual (Client detail)
   // =====================================================
   async getTodayShiftsForIndividual(
     individualId: string,
@@ -592,9 +728,6 @@ export class MobileService {
       select: { id: true },
     });
 
-    // =====================================================
-    // Compute template fields for DOCX/PDF autofill
-    // =====================================================
     const plannedMins = computeDurationMinutes(scheduleStart, scheduleEnd);
     const visitedMins = computeDurationMinutes(
       visitStart ?? null,
@@ -616,7 +749,6 @@ export class MobileService {
         : 0;
 
     const underHours = lostMinutes > 0 ? minutesToHoursStr(lostMinutes) : '';
-
     const overHours = overMinutes > 0 ? minutesToHoursStr(overMinutes) : '';
 
     const computedPayload: any = {
@@ -634,7 +766,6 @@ export class MobileService {
       ? String(payload.cancelReason ?? '').trim()
       : null;
 
-    // 1) Save DailyNote
     const record = await this.prisma.dailyNote.create({
       data: {
         shiftId,
@@ -655,20 +786,16 @@ export class MobileService {
 
         mileage: typeof mileage === 'number' ? mileage : null,
 
-        // ✅ FIX: respect cancel from mobile
         isCanceled,
         cancelReason,
 
-        // ✅ Save full payload (includes computed fields + meals + signatures)
         payload: computedPayload as unknown as object,
 
-        // legacy fields
         staffReportFileId: null,
         individualReportFileId: null,
       } as any,
     });
 
-    // 2) Google export
     const enableGoogle = process.env.ENABLE_GOOGLE_REPORTS === '1';
     if (enableGoogle) {
       try {
@@ -678,11 +805,9 @@ export class MobileService {
             computedPayload,
           );
 
-        // Save BOTH doc+pdf IDs so Web Reports can show links
         await this.prisma.dailyNote.update({
           where: { id: record.id },
           data: {
-            // legacy fields (keep for compatibility; prefer pdf)
             staffReportFileId: staff?.pdfId ?? staff?.docId ?? null,
             individualReportFileId:
               individual?.pdfId ?? individual?.docId ?? null,
@@ -815,4 +940,11 @@ export class MobileService {
       timesheetId: visit.id,
     };
   }
+}
+
+/**
+ * Tiny helper to keep select consistent without type noise.
+ */
+function highlightSelectId() {
+  return { id: true } as const;
 }

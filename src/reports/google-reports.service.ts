@@ -31,12 +31,12 @@ export class GoogleReportsService {
 
   private async getDocsClient(): Promise<docs_v1.Docs> {
     const authClient = await this.auth.getClient();
-    return google.docs({ version: 'v1', auth: authClient as any });
+    return google.docs({ version: 'v1', auth: authClient });
   }
 
   private async getDriveClient(): Promise<drive_v3.Drive> {
     const authClient = await this.auth.getClient();
-    return google.drive({ version: 'v3', auth: authClient as any });
+    return google.drive({ version: 'v3', auth: authClient });
   }
 
   /**
@@ -139,7 +139,7 @@ export class GoogleReportsService {
       },
     );
 
-    const pdfData = exportRes.data as unknown as ArrayBuffer;
+    const pdfData = exportRes.data as ArrayBuffer;
     const pdfBuffer = Buffer.from(pdfData);
 
     const pdfUpload = await drive.files.create({

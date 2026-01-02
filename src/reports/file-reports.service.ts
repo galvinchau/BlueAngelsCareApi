@@ -337,7 +337,7 @@ export class FileReportsService {
     docxBuf: Buffer,
     replacements: Record<string, string>,
   ): Buffer {
-    const zip: any = new (PizZip as any)(docxBuf);
+    const zip: any = new PizZip(docxBuf);
 
     const xmlNames = Object.keys(zip.files || {}).filter(
       (n) => n.startsWith('word/') && n.endsWith('.xml') && !!zip.file(n),
@@ -391,7 +391,7 @@ export class FileReportsService {
     const indPng = this.dataUrlToPngBuffer(individualSigDataUrl);
 
     // NOTE: avoid TS "PizZip as a type" by not typing it
-    const zip: any = new (PizZip as any)(docxBuf);
+    const zip: any = new PizZip(docxBuf);
 
     const ctFile = zip.file('[Content_Types].xml');
     if (ctFile && (staffPng || indPng)) {

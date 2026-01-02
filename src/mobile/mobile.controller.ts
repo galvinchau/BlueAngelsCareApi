@@ -10,6 +10,22 @@ import type {
 // Import class service như bình thường
 import { MobileService } from './mobile.service';
 
+type StartUnknownVisitBody = {
+  staffId: string;
+  staffName?: string;
+  staffEmail?: string;
+
+  firstName: string;
+  lastName: string;
+
+  medicaidId?: string | null;
+  clientId?: string | null;
+
+  // optional future
+  serviceCode?: string;
+  clientTime?: string; // ISO string from device (optional)
+};
+
 @Controller('mobile')
 export class MobileController {
   constructor(private readonly mobileService: MobileService) {}
@@ -54,6 +70,15 @@ export class MobileController {
       date,
       staffId,
     );
+  }
+
+  /**
+   * ✅ Start Unknown Visit (AD-HOC)
+   * POST /mobile/visits/unknown/start
+   */
+  @Post('visits/unknown/start')
+  async startUnknownVisit(@Body() body: StartUnknownVisitBody) {
+    return this.mobileService.startUnknownVisit(body);
   }
 
   /**

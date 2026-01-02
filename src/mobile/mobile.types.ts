@@ -1,10 +1,10 @@
 // src/mobile/mobile.types.ts
 
 export type MobileShiftStatus =
-  | "NOT_STARTED"
-  | "IN_PROGRESS"
-  | "COMPLETED"
-  | "CANCELLED";
+  | 'NOT_STARTED'
+  | 'IN_PROGRESS'
+  | 'COMPLETED'
+  | 'CANCELLED';
 
 export interface MobileShiftDto {
   id: string;
@@ -21,7 +21,7 @@ export interface MobileShiftDto {
   location: string;
 
   scheduleStart: string; // "08:00"
-  scheduleEnd: string;   // "12:00"
+  scheduleEnd: string; // "12:00"
 
   status: MobileShiftStatus;
   visitStart?: string | null;
