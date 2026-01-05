@@ -424,12 +424,63 @@ export class MobileService {
     private readonly reportsService: GoogleReportsService,
   ) {}
 
+  /**
+   * Get week window (Sun 00:00 -> Sat 23:59:59.999) in TZ for a given local date.
+   */
+  private getWeekWindow(localDT: DateTime): {
+    weekStart: DateTime;
+    weekEnd: DateTime;
+  } {
+    // Luxon: Monday=1 ... Sunday=7
+    // We want Sunday as start of week.
+    const weekday = localDT.weekday; // 1..7
+    const daysSinceSunday = weekday % 7; // Sunday(7)->0, Mon(1)->1, ...
+    const weekStart = localDT.startOf('day').minus({ days: daysSinceSunday });
+    const weekEnd = weekStart.plus({ days: 6 }).endOf('day');
+    return { weekStart, weekEnd };
+  }
+
+  /**
+   * Ensure ScheduleWeek exists for (individualId, date) and return weekId.
+   * This avoids Prisma validation error: "Argument 'week' is missing."
+   */
+  private async getOrCreateWeekForDate(
+    individualId: string,
+    now: DateTime,
+  ): Promise<string> {
+    const { weekStart, weekEnd } = this.getWeekWindow(now);
+
+    const existing = await this.prisma.scheduleWeek.findFirst({
+      where: {
+        individualId,
+        weekStart: { lte: weekEnd.toJSDate() },
+        weekEnd: { gte: weekStart.toJSDate() },
+      },
+      select: { id: true },
+    });
+
+    if (existing?.id) return existing.id;
+
+    const created = await this.prisma.scheduleWeek.create({
+      data: {
+        individualId,
+        weekStart: weekStart.toJSDate(),
+        weekEnd: weekEnd.toJSDate(),
+        generatedFromTemplate: false,
+        notes: 'AUTO_CREATED_BY_MOBILE_UNKNOWN_VISIT',
+        locked: false,
+      } as any,
+      select: { id: true },
+    });
+
+    return created.id;
+  }
+
   // =====================================================
   // ✅ Start Unknown Visit (AD-HOC)
-  // - Requires existing ScheduleWeek (because ScheduleShift.weekId is required)
+  // - Ensure ScheduleWeek exists (required by ScheduleShift.weekId)
   // - Create ScheduleShift for today (plannedStart=now, plannedEnd=now+60m)
   // - Create Visit check-in immediately
-  // - Mark shift notes as ADHOC
   // =====================================================
   async startUnknownVisit(
     input: StartUnknownVisitInput,
@@ -438,7 +489,6 @@ export class MobileService {
     const firstName = String(input.firstName || '').trim();
     const lastName = String(input.lastName || '').trim();
 
-    // ✅ 400 instead of 500
     if (!staffId) {
       throw new BadRequestException('Missing staffId');
     }
@@ -448,8 +498,6 @@ export class MobileService {
 
     // 1) Find individual by name (best effort)
     const individual = await this.findIndividualByName(firstName, lastName);
-
-    // ✅ 404 instead of 500
     if (!individual) {
       throw new NotFoundException(
         `Individual not found: "${firstName} ${lastName}". Please check spelling or search client first.`,
@@ -466,12 +514,11 @@ export class MobileService {
       select: { id: true, serviceCode: true, serviceName: true },
     });
 
-    // ✅ 400 instead of 500
     if (!service) {
       throw new BadRequestException(`Service not found: ${serviceCode}`);
     }
 
-    // 3) Determine times (in TZ)
+    // 3) Determine "now" in TZ (America/New_York)
     const now = input.clientTime
       ? DateTime.fromISO(input.clientTime, { setZone: true }).setZone(TZ)
       : DateTime.now().setZone(TZ);
@@ -479,32 +526,18 @@ export class MobileService {
     const plannedStart = now.toJSDate();
     const plannedEnd = now.plus({ minutes: 60 }).toJSDate();
     const scheduleDate = now.startOf('day').toJSDate();
-    const nowJs = now.toJSDate();
 
-    // 4) Create shift + visit in transaction
     try {
+      // ✅ Ensure week exists (required by ScheduleShift.weekId)
+      const weekId = await this.getOrCreateWeekForDate(individual.id, now);
+
+      // 4) Create shift + visit in transaction
       const created = await this.prisma.$transaction(async (tx) => {
-        // ✅ Find the ScheduleWeek that contains "now" (required for ScheduleShift.weekId)
-        const week = await tx.scheduleWeek.findFirst({
-          where: {
-            individualId: individual.id,
-            weekStart: { lte: nowJs },
-            weekEnd: { gte: nowJs },
-          },
-          select: { id: true },
-        });
-
-        if (!week) {
-          // ✅ 400 instead of Prisma 500
-          throw new BadRequestException(
-            `Schedule week not found for "${firstName} ${lastName}" (today). Please generate the week in Web first, then retry Unknown Visit.`,
-          );
-        }
-
         const shift = await tx.scheduleShift.create({
           data: {
-            weekId: week.id, // ✅ FIX: required relation
+            weekId, // ✅ REQUIRED
             scheduleDate,
+
             individualId: individual.id,
             serviceId: service.id,
 
@@ -541,32 +574,30 @@ export class MobileService {
 
       return { shiftId: created.shiftId };
     } catch (err: any) {
-      // ✅ Never return "mù" 500 from Prisma
+      // ✅ Never return 500 "mù"
+      console.error('[MobileService] startUnknownVisit failed', {
+        staffId,
+        firstName,
+        lastName,
+        serviceCode,
+        err,
+      });
+
       const msg = String(err?.message || '').toLowerCase();
 
-      // If we already threw a BadRequestException above, rethrow
-      if (
-        err instanceof BadRequestException ||
-        err instanceof NotFoundException
-      ) {
-        throw err;
-      }
-
-      // Prisma validation errors / missing required args -> 400
-      if (
-        msg.includes('prismaclientvalidationerror') ||
-        msg.includes('argument')
-      ) {
+      // Common Prisma validation / FK issues -> 400
+      if (msg.includes('argument') && msg.includes('missing')) {
         throw new BadRequestException(
           'Database validation error. Some required fields are missing or invalid.',
         );
       }
+      if (msg.includes('foreign key') || msg.includes('constraint')) {
+        throw new BadRequestException(
+          'Database constraint error. Please verify staff/service/individual exist.',
+        );
+      }
 
-      console.error('[MobileService] startUnknownVisit failed', {
-        input,
-        err: err?.message ?? err,
-      });
-
+      // Fallback 400 (still not 500)
       throw new BadRequestException('Unable to start Unknown Visit right now.');
     }
   }
