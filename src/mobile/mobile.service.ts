@@ -442,6 +442,7 @@ export class MobileService {
   // =====================================================
   // ✅ Start Unknown Visit (AD-HOC)
   // - Ensure weekId exists (ScheduleShift requires it)
+  // - Validate Employee exists (avoid FK constraint error)
   // - Create ScheduleShift for today (plannedStart=now, plannedEnd=now+60m)
   // - Create Visit check-in immediately
   // - Mark shift notes as ADHOC
@@ -453,18 +454,21 @@ export class MobileService {
     const firstName = String(input.firstName || '').trim();
     const lastName = String(input.lastName || '').trim();
 
-    // ✅ 400 instead of 500
-    if (!staffId) {
-      throw new BadRequestException('Missing staffId');
-    }
-    if (!firstName || !lastName) {
+    if (!staffId) throw new BadRequestException('Missing staffId');
+    if (!firstName || !lastName)
       throw new BadRequestException('Please enter First Name and Last Name');
+
+    // ✅ Validate Employee exists (avoid FK crash)
+    const employee = await (this.prisma as any).employee.findUnique({
+      where: { id: staffId },
+      select: { id: true },
+    });
+    if (!employee?.id) {
+      throw new BadRequestException(`Employee not found: ${staffId}`);
     }
 
     // 1) Find individual by name (best effort)
     const individual = await this.findIndividualByName(firstName, lastName);
-
-    // ✅ 404 instead of 500
     if (!individual) {
       throw new NotFoundException(
         `Individual not found: "${firstName} ${lastName}". Please check spelling or search client first.`,
@@ -480,8 +484,6 @@ export class MobileService {
       where: { serviceCode },
       select: { id: true, serviceCode: true, serviceName: true },
     });
-
-    // ✅ 400 instead of 500
     if (!service) {
       throw new BadRequestException(`Service not found: ${serviceCode}`);
     }
@@ -501,7 +503,6 @@ export class MobileService {
     const weekEndDate = weekEnd.toJSDate();
 
     try {
-      // 5) Create shift + visit in transaction
       const created = await this.prisma.$transaction(async (tx) => {
         // Find existing week for this individual + weekStart
         let week = await (tx as any).scheduleWeek.findFirst({
@@ -555,7 +556,6 @@ export class MobileService {
 
             status: ScheduleStatus.IN_PROGRESS,
 
-            // ✅ Mark ad-hoc so web can display badge later
             notes: `ADHOC_UNKNOWN_VISIT | Medicaid:${String(
               input.medicaidId ?? '',
             ).trim()} | ClientId:${String(input.clientId ?? '').trim()}`.trim(),
@@ -567,7 +567,7 @@ export class MobileService {
           data: {
             scheduleShiftId: shift.id,
             individualId: individual.id,
-            dspId: staffId,
+            dspId: staffId, // ✅ FK -> Employee, already validated
             serviceId: service.id,
             checkInAt: plannedStart,
             source: VisitSource.MOBILE,
@@ -580,21 +580,25 @@ export class MobileService {
 
       return { shiftId: created.shiftId };
     } catch (err: any) {
-      // Map Prisma validation errors to 400 with a clean message
       const msg = String(err?.message || '');
+
+      // Re-throw known HTTP exceptions we created
+      if (err instanceof BadRequestException) throw err;
+      if (err instanceof NotFoundException) throw err;
+
+      // Prisma FK / validation -> 400 with clear message
       if (
+        msg.includes('Foreign key constraint') ||
+        msg.includes('constraint') ||
         msg.includes('PrismaClientValidationError') ||
         msg.includes('Argument') ||
         msg.includes('Invalid') ||
         msg.includes('missing')
       ) {
         throw new BadRequestException(
-          'Database validation error. Some required fields are missing or invalid.',
+          'Database constraint error. Please verify staff/service/individual exist.',
         );
       }
-
-      // If we threw BadRequestException inside transaction, rethrow it
-      if (err instanceof BadRequestException) throw err;
 
       console.error('[MobileService] startUnknownVisit failed', {
         staffId,
