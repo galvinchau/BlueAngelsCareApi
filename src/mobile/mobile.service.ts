@@ -12,7 +12,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
-  Prisma,
   ScheduleStatus,
   VisitSource,
   type Individual,
@@ -418,28 +417,6 @@ type StartUnknownVisitInput = {
   clientTime?: string; // ISO from phone optional
 };
 
-function prismaErrToSafeMessage(err: unknown): string {
-  // ✅ Never return "500 mù" again: always map to a safe + readable message.
-  if (err instanceof Prisma.PrismaClientKnownRequestError) {
-    // Common Prisma codes:
-    // P2002 unique constraint, P2003 FK constraint, P2025 record not found, etc.
-    if (err.code === 'P2003') {
-      return 'Invalid reference data (staffId / individualId / serviceId). Please verify staffId and serviceCode are valid.';
-    }
-    if (err.code === 'P2025') {
-      return 'Required record was not found. Please verify data and try again.';
-    }
-    return `Database error (${err.code}). Please verify inputs and try again.`;
-  }
-
-  if (err instanceof Prisma.PrismaClientValidationError) {
-    return 'Database validation error. Some required fields are missing or invalid.';
-  }
-
-  // Fallback (still not 500)
-  return 'Unable to start Unknown Visit due to unexpected error. Please try again or contact admin.';
-}
-
 @Injectable()
 export class MobileService {
   constructor(
@@ -449,6 +426,7 @@ export class MobileService {
 
   // =====================================================
   // ✅ Start Unknown Visit (AD-HOC)
+  // - Requires existing ScheduleWeek (because ScheduleShift.weekId is required)
   // - Create ScheduleShift for today (plannedStart=now, plannedEnd=now+60m)
   // - Create Visit check-in immediately
   // - Mark shift notes as ADHOC
@@ -501,12 +479,31 @@ export class MobileService {
     const plannedStart = now.toJSDate();
     const plannedEnd = now.plus({ minutes: 60 }).toJSDate();
     const scheduleDate = now.startOf('day').toJSDate();
+    const nowJs = now.toJSDate();
 
-    // 4) Create shift + visit in transaction (NO "blind 500")
+    // 4) Create shift + visit in transaction
     try {
       const created = await this.prisma.$transaction(async (tx) => {
+        // ✅ Find the ScheduleWeek that contains "now" (required for ScheduleShift.weekId)
+        const week = await tx.scheduleWeek.findFirst({
+          where: {
+            individualId: individual.id,
+            weekStart: { lte: nowJs },
+            weekEnd: { gte: nowJs },
+          },
+          select: { id: true },
+        });
+
+        if (!week) {
+          // ✅ 400 instead of Prisma 500
+          throw new BadRequestException(
+            `Schedule week not found for "${firstName} ${lastName}" (today). Please generate the week in Web first, then retry Unknown Visit.`,
+          );
+        }
+
         const shift = await tx.scheduleShift.create({
           data: {
+            weekId: week.id, // ✅ FIX: required relation
             scheduleDate,
             individualId: individual.id,
             serviceId: service.id,
@@ -543,17 +540,34 @@ export class MobileService {
       });
 
       return { shiftId: created.shiftId };
-    } catch (err) {
-      // Log detailed error for Render logs, but return safe message to client
+    } catch (err: any) {
+      // ✅ Never return "mù" 500 from Prisma
+      const msg = String(err?.message || '').toLowerCase();
+
+      // If we already threw a BadRequestException above, rethrow
+      if (
+        err instanceof BadRequestException ||
+        err instanceof NotFoundException
+      ) {
+        throw err;
+      }
+
+      // Prisma validation errors / missing required args -> 400
+      if (
+        msg.includes('prismaclientvalidationerror') ||
+        msg.includes('argument')
+      ) {
+        throw new BadRequestException(
+          'Database validation error. Some required fields are missing or invalid.',
+        );
+      }
+
       console.error('[MobileService] startUnknownVisit failed', {
-        staffId,
-        firstName,
-        lastName,
-        serviceCode,
-        err,
+        input,
+        err: err?.message ?? err,
       });
 
-      throw new BadRequestException(prismaErrToSafeMessage(err));
+      throw new BadRequestException('Unable to start Unknown Visit right now.');
     }
   }
 
