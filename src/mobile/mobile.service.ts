@@ -12,6 +12,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  Prisma,
   ScheduleStatus,
   VisitSource,
   type Individual,
@@ -417,6 +418,28 @@ type StartUnknownVisitInput = {
   clientTime?: string; // ISO from phone optional
 };
 
+function prismaErrToSafeMessage(err: unknown): string {
+  // ✅ Never return "500 mù" again: always map to a safe + readable message.
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    // Common Prisma codes:
+    // P2002 unique constraint, P2003 FK constraint, P2025 record not found, etc.
+    if (err.code === 'P2003') {
+      return 'Invalid reference data (staffId / individualId / serviceId). Please verify staffId and serviceCode are valid.';
+    }
+    if (err.code === 'P2025') {
+      return 'Required record was not found. Please verify data and try again.';
+    }
+    return `Database error (${err.code}). Please verify inputs and try again.`;
+  }
+
+  if (err instanceof Prisma.PrismaClientValidationError) {
+    return 'Database validation error. Some required fields are missing or invalid.';
+  }
+
+  // Fallback (still not 500)
+  return 'Unable to start Unknown Visit due to unexpected error. Please try again or contact admin.';
+}
+
 @Injectable()
 export class MobileService {
   constructor(
@@ -479,46 +502,59 @@ export class MobileService {
     const plannedEnd = now.plus({ minutes: 60 }).toJSDate();
     const scheduleDate = now.startOf('day').toJSDate();
 
-    // 4) Create shift + visit in transaction
-    const created = await this.prisma.$transaction(async (tx) => {
-      const shift = await tx.scheduleShift.create({
-        data: {
-          scheduleDate,
-          individualId: individual.id,
-          serviceId: service.id,
+    // 4) Create shift + visit in transaction (NO "blind 500")
+    try {
+      const created = await this.prisma.$transaction(async (tx) => {
+        const shift = await tx.scheduleShift.create({
+          data: {
+            scheduleDate,
+            individualId: individual.id,
+            serviceId: service.id,
 
-          plannedStart,
-          plannedEnd,
+            plannedStart,
+            plannedEnd,
 
-          plannedDspId: staffId,
-          actualDspId: staffId,
+            plannedDspId: staffId,
+            actualDspId: staffId,
 
-          status: ScheduleStatus.IN_PROGRESS,
+            status: ScheduleStatus.IN_PROGRESS,
 
-          // ✅ Mark ad-hoc so web can display badge later
-          notes: `ADHOC_UNKNOWN_VISIT | Medicaid:${String(
-            input.medicaidId ?? '',
-          ).trim()} | ClientId:${String(input.clientId ?? '').trim()}`.trim(),
-        } as any,
-        select: { id: true },
+            // ✅ Mark ad-hoc so web can display badge later
+            notes: `ADHOC_UNKNOWN_VISIT | Medicaid:${String(
+              input.medicaidId ?? '',
+            ).trim()} | ClientId:${String(input.clientId ?? '').trim()}`.trim(),
+          } as any,
+          select: { id: true },
+        });
+
+        await tx.visit.create({
+          data: {
+            scheduleShiftId: shift.id,
+            individualId: individual.id,
+            dspId: staffId,
+            serviceId: service.id,
+            checkInAt: plannedStart,
+            source: VisitSource.MOBILE,
+          } as any,
+          select: highlightSelectId(),
+        });
+
+        return { shiftId: shift.id };
       });
 
-      await tx.visit.create({
-        data: {
-          scheduleShiftId: shift.id,
-          individualId: individual.id,
-          dspId: staffId,
-          serviceId: service.id,
-          checkInAt: plannedStart,
-          source: VisitSource.MOBILE,
-        } as any,
-        select: highlightSelectId(),
+      return { shiftId: created.shiftId };
+    } catch (err) {
+      // Log detailed error for Render logs, but return safe message to client
+      console.error('[MobileService] startUnknownVisit failed', {
+        staffId,
+        firstName,
+        lastName,
+        serviceCode,
+        err,
       });
 
-      return { shiftId: shift.id };
-    });
-
-    return { shiftId: created.shiftId };
+      throw new BadRequestException(prismaErrToSafeMessage(err));
+    }
   }
 
   /**
