@@ -23,9 +23,6 @@ import { DateTime } from 'luxon';
 import { PrismaService } from '../prisma/prisma.service';
 import { GoogleReportsService } from '../reports/google-reports.service';
 
-// Prisma error types (runtime)
-import { Prisma } from '@prisma/client';
-
 /**
  * Mobile shift status
  */
@@ -427,37 +424,109 @@ export class MobileService {
     private readonly reportsService: GoogleReportsService,
   ) {}
 
+  /**
+   * ✅ Resolve staffId from either:
+   * - Employee.id (cuid)
+   * - Employee.employeeId (human code like "BAC-E-2025-008")
+   */
+  private async resolveEmployeeId(staffIdRaw: string): Promise<string | null> {
+    const staffId = String(staffIdRaw || '').trim();
+    if (!staffId) return null;
+
+    const emp = await this.prisma.employee.findFirst({
+      where: {
+        OR: [{ id: staffId }, { employeeId: staffId }],
+      },
+      select: { id: true },
+    });
+
+    return emp?.id ?? null;
+  }
+
+  /**
+   * Compute Sunday 00:00 as weekStart (BAC Scheduler convention: Sun -> Sat)
+   */
+  private getWeekWindow(nowTz: DateTime): {
+    weekStart: DateTime;
+    weekEnd: DateTime;
+  } {
+    const dayStart = nowTz.startOf('day');
+    // Luxon weekday: 1=Mon ... 7=Sun => subtract weekday%7 to get Sunday
+    const daysToSubtract = dayStart.weekday % 7;
+    const weekStart = dayStart.minus({ days: daysToSubtract });
+    const weekEnd = weekStart.plus({ days: 7 }).minus({ milliseconds: 1 });
+    return { weekStart, weekEnd };
+  }
+
+  /**
+   * Ensure ScheduleWeek exists (required by ScheduleShift.weekId)
+   * NOTE: no unique constraint on (individualId, weekStart) so we do findFirst then create.
+   */
+  private async getOrCreateScheduleWeekIdTx(
+    tx: any,
+    individualId: string,
+    nowTz: DateTime,
+  ): Promise<string> {
+    const { weekStart, weekEnd } = this.getWeekWindow(nowTz);
+
+    const weekStartJs = weekStart.toJSDate();
+    const weekEndJs = weekEnd.toJSDate();
+
+    const existing = await tx.scheduleWeek.findFirst({
+      where: {
+        individualId,
+        weekStart: weekStartJs,
+      },
+      select: { id: true },
+    });
+
+    if (existing?.id) return existing.id;
+
+    const created = await tx.scheduleWeek.create({
+      data: {
+        individualId,
+        // templateId is optional
+        weekStart: weekStartJs,
+        weekEnd: weekEndJs,
+        // generatedFromTemplate default true in schema
+        notes: 'AUTO_CREATED_BY_UNKNOWN_VISIT',
+      },
+      select: { id: true },
+    });
+
+    return created.id;
+  }
+
   // =====================================================
   // ✅ Start Unknown Visit (AD-HOC)
+  // - Create ScheduleWeek (if missing) for this week
   // - Create ScheduleShift for today (plannedStart=now, plannedEnd=now+60m)
   // - Create Visit check-in immediately
   // - Mark shift notes as ADHOC
-  // - IMPORTANT: ScheduleShift requires weekId (ScheduleWeek)
+  // - NEVER return "blind 500": map to 400/404 with messages
   // =====================================================
   async startUnknownVisit(
     input: StartUnknownVisitInput,
   ): Promise<{ shiftId: string }> {
-    const rawStaff = String(input.staffId || '').trim();
+    const staffIdRaw = String(input.staffId || '').trim();
     const firstName = String(input.firstName || '').trim();
     const lastName = String(input.lastName || '').trim();
 
-    if (!rawStaff) {
+    if (!staffIdRaw) {
       throw new BadRequestException('Missing staffId');
     }
     if (!firstName || !lastName) {
       throw new BadRequestException('Please enter First Name and Last Name');
     }
 
-    // Resolve staffId (accept Employee.id cuid OR employeeCode)
-    const staff = await this.resolveEmployee(rawStaff);
-    if (!staff) {
-      throw new BadRequestException(`Employee not found: ${rawStaff}`);
+    // Resolve employee.id (supports both cuid and employeeId code)
+    const staffId = await this.resolveEmployeeId(staffIdRaw);
+    if (!staffId) {
+      throw new BadRequestException(`Employee not found: ${staffIdRaw}`);
     }
-    const staffId = staff.id;
 
     // 1) Find individual by name (best effort)
     const individual = await this.findIndividualByName(firstName, lastName);
-
     if (!individual) {
       throw new NotFoundException(
         `Individual not found: "${firstName} ${lastName}". Please check spelling or search client first.`,
@@ -487,64 +556,18 @@ export class MobileService {
     const plannedEnd = now.plus({ minutes: 60 }).toJSDate();
     const scheduleDate = now.startOf('day').toJSDate();
 
-    // Compute week range (Sunday 00:00 -> Saturday 23:59:59.999)
-    const { weekStart, weekEnd } = this.computeWeekRangeSunday(now);
-
     try {
+      // 4) Create week (if missing) + shift + visit in transaction
       const created = await this.prisma.$transaction(async (tx) => {
-        // Find scheduleWeek that contains scheduleDate
-        let week = await tx.scheduleWeek.findFirst({
-          where: {
-            individualId: individual.id,
-            weekStart: { lte: scheduleDate },
-            weekEnd: { gte: scheduleDate },
-          },
-          select: { id: true, templateId: true },
-        });
-
-        // If not found, create scheduleWeek using a valid templateId
-        if (!week) {
-          const latestWeek = await tx.scheduleWeek.findFirst({
-            where: { individualId: individual.id },
-            orderBy: { weekStart: 'desc' },
-            select: { templateId: true },
-          });
-
-          // Fallback: try to find any master template for this individual
-          let templateId = latestWeek?.templateId ?? null;
-
-          if (!templateId) {
-            const tmpl = await tx.masterScheduleTemplate.findFirst({
-              where: { individualId: individual.id },
-              orderBy: { createdAt: 'desc' },
-              select: { id: true },
-            });
-            templateId = tmpl?.id ?? null;
-          }
-
-          if (!templateId) {
-            throw new BadRequestException(
-              'Unable to start Unknown Visit right now. Missing schedule template for this Individual.',
-            );
-          }
-
-          week = await tx.scheduleWeek.create({
-            data: {
-              individualId: individual.id,
-              templateId,
-              weekStart: weekStart.toJSDate(),
-              weekEnd: weekEnd.toJSDate(),
-              generatedFromTemplate: false,
-              notes: 'ADHOC_UNKNOWN_VISIT_WEEK',
-              locked: false,
-            } as any,
-            select: { id: true, templateId: true },
-          });
-        }
+        const weekId = await this.getOrCreateScheduleWeekIdTx(
+          tx,
+          individual.id,
+          now,
+        );
 
         const shift = await tx.scheduleShift.create({
           data: {
-            weekId: week.id, // ✅ REQUIRED by schema
+            weekId,
             scheduleDate,
             individualId: individual.id,
             serviceId: service.id,
@@ -581,85 +604,26 @@ export class MobileService {
 
       return { shiftId: created.shiftId };
     } catch (err: any) {
-      // Map Prisma errors to 400 (never leak 500)
-      throw this.mapPrismaErrorToHttp(err);
-    }
-  }
+      // Never leak raw 500 to mobile; give friendly 400
+      console.error('[MobileService] startUnknownVisit failed', {
+        staffIdRaw,
+        staffIdResolved: staffId,
+        firstName,
+        lastName,
+        serviceCode,
+        err: err?.message ?? err,
+      });
 
-  /**
-   * ✅ Helper: resolve employee by id or employeeCode
-   */
-  private async resolveEmployee(
-    staffIdOrCode: string,
-  ): Promise<{ id: string } | null> {
-    const key = String(staffIdOrCode || '').trim();
-    if (!key) return null;
-
-    const emp = await this.prisma.employee.findFirst({
-      where: {
-        OR: [{ id: key }, { employeeCode: key }],
-      },
-      select: { id: true },
-    });
-
-    return emp ?? null;
-  }
-
-  /**
-   * ✅ Helper: compute week range (Sunday-Saturday) in TZ
-   */
-  private computeWeekRangeSunday(dt: DateTime): {
-    weekStart: DateTime;
-    weekEnd: DateTime;
-  } {
-    // Luxon weekday: Mon=1 ... Sun=7
-    const daysSinceSunday = dt.weekday % 7; // Sun -> 0, Mon -> 1, ... Sat -> 6
-    const weekStart = dt
-      .startOf('day')
-      .minus({ days: daysSinceSunday })
-      .setZone(TZ);
-
-    const weekEnd = weekStart.plus({ days: 6 }).endOf('day');
-
-    return { weekStart, weekEnd };
-  }
-
-  /**
-   * ✅ Helper: turn Prisma errors into friendly 400 messages
-   */
-  private mapPrismaErrorToHttp(err: any): BadRequestException {
-    // Already an HttpException -> pass through
-    if (err instanceof BadRequestException) return err;
-
-    // Prisma validation errors (missing required fields, wrong shape)
-    if (err instanceof Prisma.PrismaClientValidationError) {
-      return new BadRequestException(
-        'Database validation error. Some required fields are missing or invalid.',
-      );
-    }
-
-    // Prisma known request errors (constraints, FK, etc.)
-    if (err instanceof Prisma.PrismaClientKnownRequestError) {
-      // Common cases:
-      // P2003 = foreign key constraint failed
-      // P2002 = unique constraint failed
-      if (err.code === 'P2003') {
-        return new BadRequestException(
-          'Database constraint error. Please verify staff/service/individual exist.',
+      // Prisma validation/constraint errors often include keywords like "Invalid" / "missing" / "constraint"
+      const msg = String(err?.message || '');
+      if (msg.toLowerCase().includes('prisma')) {
+        throw new BadRequestException(
+          'Database validation error. Some required fields are missing or invalid.',
         );
       }
-      if (err.code === 'P2002') {
-        return new BadRequestException(
-          'Database constraint error. Duplicate record detected.',
-        );
-      }
-      return new BadRequestException(
-        `Database error (${err.code}). Unable to start Unknown Visit right now.`,
-      );
-    }
 
-    // Default safe error
-    return new BadRequestException('Unable to start Unknown Visit right now.');
+      throw new BadRequestException('Unable to start Unknown Visit right now.');
+    }
   }
 
   /**
@@ -763,13 +727,6 @@ export class MobileService {
     staffId: string,
     date: string,
   ): Promise<{ shifts: MobileShift[] }> {
-    // Resolve staff id/code to employee.id (cuid)
-    const staff = await this.resolveEmployee(String(staffId || '').trim());
-    if (!staff) {
-      throw new BadRequestException(`Employee not found: ${staffId}`);
-    }
-    const staffKey = staff.id;
-
     const dayStartLocal = DateTime.fromISO(date, { zone: TZ })
       .startOf('day')
       .toJSDate();
@@ -780,14 +737,14 @@ export class MobileService {
     const shifts = await this.prisma.scheduleShift.findMany({
       where: {
         scheduleDate: { gte: dayStartLocal, lte: dayEndLocal },
-        OR: [{ plannedDspId: staffKey }, { actualDspId: staffKey }],
+        OR: [{ plannedDspId: staffId }, { actualDspId: staffId }],
       },
       include: {
         individual: true,
         service: true,
         visits: {
           where: {
-            dspId: staffKey,
+            dspId: staffId,
             checkInAt: { gte: dayStartLocal, lte: dayEndLocal },
           },
           orderBy: { checkInAt: 'asc' },
@@ -798,7 +755,7 @@ export class MobileService {
 
     return {
       shifts: shifts.map((s) =>
-        mapShiftToMobileShift({ shift: s, staffId: staffKey, date }),
+        mapShiftToMobileShift({ shift: s, staffId, date }),
       ),
     };
   }
@@ -811,15 +768,6 @@ export class MobileService {
     date: string,
     staffId?: string,
   ): Promise<{ shifts: MobileShift[] }> {
-    let staffKey: string | undefined = undefined;
-    if (staffId) {
-      const staff = await this.resolveEmployee(String(staffId || '').trim());
-      if (!staff) {
-        throw new BadRequestException(`Employee not found: ${staffId}`);
-      }
-      staffKey = staff.id;
-    }
-
     const dayStartLocal = DateTime.fromISO(date, { zone: TZ })
       .startOf('day')
       .toJSDate();
@@ -838,7 +786,7 @@ export class MobileService {
         visits: {
           where: {
             checkInAt: { gte: dayStartLocal, lte: dayEndLocal },
-            ...(staffKey ? { dspId: staffKey } : {}),
+            ...(staffId ? { dspId: staffId } : {}),
           },
           orderBy: { checkInAt: 'asc' },
         },
@@ -848,11 +796,7 @@ export class MobileService {
 
     return {
       shifts: shifts.map((s) =>
-        mapShiftToMobileShiftForClientDetail({
-          shift: s,
-          date,
-          staffId: staffKey,
-        }),
+        mapShiftToMobileShiftForClientDetail({ shift: s, date, staffId }),
       ),
     };
   }
@@ -861,17 +805,9 @@ export class MobileService {
   // Save Daily Note from mobile
   // =====================================================
   async submitDailyNote(payload: MobileDailyNotePayload) {
-    // Resolve staff
-    const staff = await this.resolveEmployee(
-      String(payload.staffId || '').trim(),
-    );
-    if (!staff) {
-      throw new BadRequestException(`Employee not found: ${payload.staffId}`);
-    }
-    const staffId = staff.id;
-
     const {
       shiftId,
+      staffId,
       individualId,
       date,
       serviceCode,
@@ -922,7 +858,6 @@ export class MobileService {
 
     const computedPayload: any = {
       ...payload,
-      staffId, // store resolved id
       totalH,
       billableUnits,
       lostMinutes: lostMinutes > 0 ? String(lostMinutes) : '',
@@ -969,7 +904,7 @@ export class MobileService {
     const enableGoogle = process.env.ENABLE_GOOGLE_REPORTS === '1';
     if (enableGoogle) {
       try {
-        const { staff: staffDoc, individual } =
+        const { staff, individual } =
           await this.reportsService.generateDailyNoteDocs(
             record.id,
             computedPayload,
@@ -978,7 +913,7 @@ export class MobileService {
         await this.prisma.dailyNote.update({
           where: { id: record.id },
           data: {
-            staffReportFileId: staffDoc?.pdfId ?? staffDoc?.docId ?? null,
+            staffReportFileId: staff?.pdfId ?? staff?.docId ?? null,
             individualReportFileId:
               individual?.pdfId ?? individual?.docId ?? null,
           } as any,
@@ -1002,12 +937,6 @@ export class MobileService {
     staffId: string,
     clientTime?: string,
   ): Promise<CheckInOutResponse> {
-    const staff = await this.resolveEmployee(String(staffId || '').trim());
-    if (!staff) {
-      throw new BadRequestException(`Employee not found: ${staffId}`);
-    }
-    const staffKey = staff.id;
-
     const checkInAt = clientTime
       ? DateTime.fromISO(clientTime, { setZone: true }).setZone(TZ).toJSDate()
       : DateTime.now().setZone(TZ).toJSDate();
@@ -1026,7 +955,7 @@ export class MobileService {
       data: {
         scheduleShiftId: shiftId,
         individualId: shift?.individualId ?? '',
-        dspId: staffKey,
+        dspId: staffId,
         serviceId: shift?.serviceId ?? null,
         checkInAt,
         source: VisitSource.MOBILE,
@@ -1038,7 +967,7 @@ export class MobileService {
         where: { id: shiftId },
         data: {
           status: ScheduleStatus.IN_PROGRESS,
-          actualDspId: shift.actualDspId ?? staffKey,
+          actualDspId: shift.actualDspId ?? staffId,
         },
       });
     }
@@ -1047,7 +976,7 @@ export class MobileService {
       status: 'OK',
       mode: 'IN',
       shiftId,
-      staffId: staffKey,
+      staffId,
       time: checkInAt.toISOString(),
       timesheetId: visit.id,
     };
@@ -1061,12 +990,6 @@ export class MobileService {
     staffId: string,
     clientTime?: string,
   ): Promise<CheckInOutResponse> {
-    const staff = await this.resolveEmployee(String(staffId || '').trim());
-    if (!staff) {
-      throw new BadRequestException(`Employee not found: ${staffId}`);
-    }
-    const staffKey = staff.id;
-
     const checkOutAt = clientTime
       ? DateTime.fromISO(clientTime, { setZone: true }).setZone(TZ).toJSDate()
       : DateTime.now().setZone(TZ).toJSDate();
@@ -1082,7 +1005,7 @@ export class MobileService {
     });
 
     let visit = await this.prisma.visit.findFirst({
-      where: { scheduleShiftId: shiftId, dspId: staffKey, checkOutAt: null },
+      where: { scheduleShiftId: shiftId, dspId: staffId, checkOutAt: null },
       orderBy: { checkInAt: 'desc' },
     });
 
@@ -1096,7 +1019,7 @@ export class MobileService {
         data: {
           scheduleShiftId: shiftId,
           individualId: shift?.individualId ?? '',
-          dspId: staffKey,
+          dspId: staffId,
           serviceId: shift?.serviceId ?? null,
           checkInAt: checkOutAt,
           checkOutAt,
@@ -1109,7 +1032,7 @@ export class MobileService {
       where: { id: shiftId },
       data: {
         status: ScheduleStatus.COMPLETED,
-        actualDspId: shift?.actualDspId ?? staffKey,
+        actualDspId: shift?.actualDspId ?? staffId,
       },
     });
 
@@ -1117,7 +1040,7 @@ export class MobileService {
       status: 'OK',
       mode: 'OUT',
       shiftId,
-      staffId: staffKey,
+      staffId,
       time: checkOutAt.toISOString(),
       timesheetId: visit.id,
     };
