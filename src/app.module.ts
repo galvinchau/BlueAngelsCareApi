@@ -10,8 +10,21 @@ import { ReportsModule } from './reports/reports.module';
 // ✅ ADD
 import { HealthController } from './health/health.controller';
 
+// ✅ NEW modules
+import { TimeKeepingModule } from './time-keeping/time-keeping.module';
+import { EmployeesModule } from './employees/employees.module';
+
 @Module({
-  imports: [PrismaModule, MobileModule, MobileAuthModule, ReportsModule],
+  imports: [
+    PrismaModule,
+    MobileModule,
+    MobileAuthModule,
+    ReportsModule,
+
+    // ✅ NEW
+    TimeKeepingModule,
+    EmployeesModule,
+  ],
   controllers: [
     AppController,
     HealthController, // ✅ ADD
