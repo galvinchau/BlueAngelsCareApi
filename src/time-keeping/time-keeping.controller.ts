@@ -13,7 +13,7 @@ import type { Request } from 'express';
 import { TimeKeepingService } from './time-keeping.service';
 
 type CheckBody = {
-  staffId: string;
+  staffId?: string; // allow optional (can be resolved by ctx email)
   latitude?: number;
   longitude?: number;
   accuracy?: number;
@@ -35,10 +35,9 @@ function readCtx(
   const hUserId = (req.headers['x-user-id'] as string) || '';
 
   const userType =
-    (hUserType || fallback?.userType || '').toString() || 'ADMIN';
-  const userEmail =
-    (hUserEmail || fallback?.userEmail || '').toString() || 'admin@local';
-  const userId = (hUserId || fallback?.userId || '').toString() || 'admin';
+    (hUserType || fallback?.userType || '').toString() || 'UNKNOWN';
+  const userEmail = (hUserEmail || fallback?.userEmail || '').toString() || '';
+  const userId = (hUserId || fallback?.userId || '').toString() || '';
 
   return { userType, userEmail, userId };
 }
@@ -50,38 +49,59 @@ export class TimeKeepingController {
   // ---------- Office self endpoints ----------
   @Get('status')
   async getStatus(
+    @Req() req: Request,
     @Query('staffId') staffId?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('userType') userTypeFromQuery?: string,
+    @Query('userEmail') userEmailFromQuery?: string,
+    @Query('userId') userIdFromQuery?: string,
   ) {
-    if (!staffId || !from || !to) {
-      throw new BadRequestException('Missing staffId/from/to');
+    if (!from || !to) {
+      throw new BadRequestException('Missing from/to');
     }
-    return this.svc.getStatus({ staffId, from, to });
+
+    const ctx = readCtx(req, {
+      userType: userTypeFromQuery,
+      userEmail: userEmailFromQuery,
+      userId: userIdFromQuery,
+    });
+
+    return this.svc.getStatus({ staffId, from, to, ctx });
   }
 
   @Get('attendance')
   async getAttendance(
+    @Req() req: Request,
     @Query('staffId') staffId?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('userType') userTypeFromQuery?: string,
+    @Query('userEmail') userEmailFromQuery?: string,
+    @Query('userId') userIdFromQuery?: string,
   ) {
-    if (!staffId || !from || !to) {
-      throw new BadRequestException('Missing staffId/from/to');
+    if (!from || !to) {
+      throw new BadRequestException('Missing from/to');
     }
-    return this.svc.getAttendance({ staffId, from, to });
+
+    const ctx = readCtx(req, {
+      userType: userTypeFromQuery,
+      userEmail: userEmailFromQuery,
+      userId: userIdFromQuery,
+    });
+
+    return this.svc.getAttendance({ staffId, from, to, ctx });
   }
 
   @Post('check-in')
   async checkIn(@Req() req: Request, @Body() body: CheckBody) {
-    if (!body?.staffId) throw new BadRequestException('Missing staffId');
-
     const ctx = readCtx(req, {
       userType: body.userType,
       userEmail: body.userEmail,
       userId: body.userId,
     });
 
+    // staffId can be resolved by ctx.userEmail
     return this.svc.checkIn({
       staffId: body.staffId,
       latitude: body.latitude,
@@ -95,8 +115,6 @@ export class TimeKeepingController {
 
   @Post('check-out')
   async checkOut(@Req() req: Request, @Body() body: CheckBody) {
-    if (!body?.staffId) throw new BadRequestException('Missing staffId');
-
     const ctx = readCtx(req, {
       userType: body.userType,
       userEmail: body.userEmail,

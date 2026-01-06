@@ -8,9 +8,10 @@ import { DateTime } from 'luxon';
 import type { OfficeAttendanceSource } from '@prisma/client';
 
 const TZ = 'America/New_York';
+const OFFICE_ROLE_LABEL = 'Office Staff';
 
 type AdminCtx = {
-  userType: string; // ADMIN | HR | ...
+  userType: string; // ADMIN | HR | COORDINATOR | ...
   userEmail: string;
   userId: string;
 };
@@ -54,9 +55,9 @@ function requireGPS(lat?: number, lng?: number, acc?: number) {
 
 function normalizeCtx(ctx?: AdminCtx): AdminCtx {
   return {
-    userType: (ctx?.userType || 'ADMIN').toString(),
-    userEmail: (ctx?.userEmail || 'admin@local').toString(),
-    userId: (ctx?.userId || 'admin').toString(),
+    userType: (ctx?.userType || 'UNKNOWN').toString(),
+    userEmail: (ctx?.userEmail || '').toString(),
+    userId: (ctx?.userId || '').toString(),
   };
 }
 
@@ -67,6 +68,75 @@ export class TimeKeepingService {
   private ensureApprover(ctx: AdminCtx) {
     if (ctx.userType !== 'ADMIN' && ctx.userType !== 'HR') {
       throw new ForbiddenException('Only ADMIN/HR can approve time keeping.');
+    }
+  }
+
+  /**
+   * Resolve staffId for self-service:
+   * - Prefer explicit staffId (BAC-E-xxxx)
+   * - Else resolve by ctx.userEmail -> Employee.email
+   */
+  private async resolveSelfStaff(params: { staffId?: string; ctx?: AdminCtx }) {
+    const ctx = normalizeCtx(params.ctx);
+
+    if (params.staffId && params.staffId.trim()) {
+      const staffId = params.staffId.trim();
+      const emp = await this.prisma.employee.findFirst({
+        where: { employeeId: staffId },
+        select: {
+          employeeId: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          role: true,
+        },
+      });
+
+      if (!emp) {
+        throw new ForbiddenException(
+          'Employee profile not found. Please ensure this office user is linked to an Employee record.',
+        );
+      }
+
+      return emp;
+    }
+
+    const email = (ctx.userEmail || '').trim().toLowerCase();
+    if (!email) {
+      throw new ForbiddenException(
+        'Employee profile not found. Missing userEmail context.',
+      );
+    }
+
+    const emp = await this.prisma.employee.findFirst({
+      where: { email },
+      select: {
+        employeeId: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        role: true,
+      },
+    });
+
+    if (!emp) {
+      throw new ForbiddenException(
+        'Employee profile not found. Please ensure this office user is linked to an Employee record.',
+      );
+    }
+
+    return emp;
+  }
+
+  private ensureOfficeStaff(emp: {
+    role: string | null;
+    email: string | null;
+  }) {
+    const role = (emp.role || '').trim();
+    if (role !== OFFICE_ROLE_LABEL) {
+      throw new ForbiddenException(
+        'Access denied. Time Keeping is for Office staff only.',
+      );
     }
   }
 
@@ -126,8 +196,21 @@ export class TimeKeepingService {
     }
   }
 
-  async getStatus(params: { staffId: string; from: string; to: string }) {
-    const { staffId, from, to } = params;
+  async getStatus(params: {
+    staffId?: string;
+    from: string;
+    to: string;
+    ctx?: AdminCtx;
+  }) {
+    const { from, to } = params;
+
+    const emp = await this.resolveSelfStaff({
+      staffId: params.staffId,
+      ctx: params.ctx,
+    });
+    this.ensureOfficeStaff(emp);
+
+    const staffId = emp.employeeId;
 
     await this.applyAutoCheckoutIfNeeded(staffId, from, to);
 
@@ -145,7 +228,10 @@ export class TimeKeepingService {
 
     return {
       staffId,
-      staffName: latest?.staffName || '-',
+      staffName:
+        latest?.staffName ||
+        `${emp.firstName ?? ''} ${emp.lastName ?? ''}`.trim() ||
+        '-',
       role: 'OFFICE',
       isCheckedIn: !!open,
       activeSessionId: open?.id || null,
@@ -160,8 +246,22 @@ export class TimeKeepingService {
     };
   }
 
-  async getAttendance(params: { staffId: string; from: string; to: string }) {
-    const { staffId, from, to } = params;
+  async getAttendance(params: {
+    staffId?: string;
+    from: string;
+    to: string;
+    ctx?: AdminCtx;
+  }) {
+    const { from, to } = params;
+
+    const emp = await this.resolveSelfStaff({
+      staffId: params.staffId,
+      ctx: params.ctx,
+    });
+    this.ensureOfficeStaff(emp);
+
+    const staffId = emp.employeeId;
+
     const range = weekStartEnd(from, to);
     if (!range) throw new BadRequestException('Invalid from/to');
 
@@ -188,7 +288,10 @@ export class TimeKeepingService {
       return {
         id: ev.id,
         staffId: ev.staffId,
-        staffName: ev.staffName || '-',
+        staffName:
+          ev.staffName ||
+          `${emp.firstName ?? ''} ${emp.lastName ?? ''}`.trim() ||
+          '-',
         checkInAt: ev.checkInAt.toISOString(),
         checkOutAt: ev.checkOutAt ? ev.checkOutAt.toISOString() : null,
         totalMinutes,
@@ -202,22 +305,25 @@ export class TimeKeepingService {
   }
 
   async checkIn(params: {
-    staffId: string;
+    staffId?: string;
     latitude?: number;
     longitude?: number;
     accuracy?: number;
     source: 'WEB' | 'MOBILE';
     clientTime?: string;
-
-    // ✅ Option A: allow passing permission context (for future enforcement)
     ctx?: AdminCtx;
   }) {
-    const { staffId, latitude, longitude, accuracy, source } = params;
-
-    // (ctx currently unused; kept for type alignment + future rules)
-    // const ctx = params.ctx ? normalizeCtx(params.ctx) : null;
+    const { latitude, longitude, accuracy, source } = params;
 
     requireGPS(latitude, longitude, accuracy);
+
+    const emp = await this.resolveSelfStaff({
+      staffId: params.staffId,
+      ctx: params.ctx,
+    });
+    this.ensureOfficeStaff(emp);
+
+    const staffId = emp.employeeId;
 
     const now = todayLocal();
     const weekday = now.weekday; // Mon=1..Sun=7
@@ -241,18 +347,13 @@ export class TimeKeepingService {
       );
     }
 
-    // lookup employee to cache staffName/email (optional)
-    const emp = await this.prisma.employee.findFirst({
-      where: { employeeId: staffId },
-      select: { firstName: true, lastName: true, email: true },
-    });
-
-    const staffName = emp ? `${emp.firstName} ${emp.lastName}` : null;
+    const staffName =
+      `${emp.firstName ?? ''} ${emp.lastName ?? ''}`.trim() || null;
 
     const created = await this.prisma.officeAttendanceEvent.create({
       data: {
         staffId,
-        staffEmail: emp?.email ?? null,
+        staffEmail: emp.email ?? null,
         staffName,
         checkInAt: now.toJSDate(),
         checkInLat: latitude,
@@ -263,26 +364,29 @@ export class TimeKeepingService {
       },
     });
 
-    return { ok: true, id: created.id };
+    return { ok: true, id: created.id, staffId };
   }
 
   async checkOut(params: {
-    staffId: string;
+    staffId?: string;
     latitude?: number;
     longitude?: number;
     accuracy?: number;
     source: 'WEB' | 'MOBILE';
     clientTime?: string;
-
-    // ✅ Option A: allow passing permission context (for future enforcement)
     ctx?: AdminCtx;
   }) {
-    const { staffId, latitude, longitude, accuracy } = params;
-
-    // (ctx currently unused; kept for type alignment + future rules)
-    // const ctx = params.ctx ? normalizeCtx(params.ctx) : null;
+    const { latitude, longitude, accuracy } = params;
 
     requireGPS(latitude, longitude, accuracy);
+
+    const emp = await this.resolveSelfStaff({
+      staffId: params.staffId,
+      ctx: params.ctx,
+    });
+    this.ensureOfficeStaff(emp);
+
+    const staffId = emp.employeeId;
 
     const open = await this.prisma.officeAttendanceEvent.findFirst({
       where: { staffId, checkOutAt: null },
@@ -305,7 +409,7 @@ export class TimeKeepingService {
       },
     });
 
-    return { ok: true };
+    return { ok: true, staffId };
   }
 
   // =================== ADMIN/HR Approval ===================
@@ -397,15 +501,18 @@ export class TimeKeepingService {
       const c = agg.get(staffId) || { computedMinutes: 0, flagsCount: 0 };
       const meta = empMap.get(staffId) || { name: staffId, position: 'Office' };
 
+      // Avoid TS2871: do not chain `?? null ??`
+      const computedMinutes = c.computedMinutes;
+      const adjustedMinutes = a?.adjustedMinutes ?? null;
       const finalMinutes =
-        a?.finalMinutes ?? a?.adjustedMinutes ?? c.computedMinutes;
+        a?.finalMinutes ?? a?.adjustedMinutes ?? computedMinutes;
 
       return {
         staffId,
         name: meta.name,
         position: meta.position,
-        computedMinutes: c.computedMinutes,
-        adjustedMinutes: a?.adjustedMinutes ?? null,
+        computedMinutes,
+        adjustedMinutes,
         finalMinutes,
         status: (a?.status || 'PENDING') as 'PENDING' | 'APPROVED',
         approvedBy: a?.approvedByEmail ?? null,
@@ -507,6 +614,7 @@ export class TimeKeepingService {
     const name = emp ? `${emp.firstName} ${emp.lastName}` : staffId;
     const position = emp?.role || 'Office';
 
+    const adjustedMinutes = approval?.adjustedMinutes ?? null;
     const finalMinutes =
       approval?.finalMinutes ?? approval?.adjustedMinutes ?? computedMinutes;
 
@@ -515,7 +623,7 @@ export class TimeKeepingService {
       name,
       position,
       computedMinutes,
-      adjustedMinutes: approval?.adjustedMinutes ?? null,
+      adjustedMinutes,
       finalMinutes,
       status: (approval?.status || 'PENDING') as 'PENDING' | 'APPROVED',
       approvedBy: approval?.approvedByEmail ?? null,
@@ -525,6 +633,7 @@ export class TimeKeepingService {
       flagsCount,
     };
 
+    // ✅ IMPORTANT: return shape for Web modal: { row, attendance }
     return { row, attendance };
   }
 
@@ -579,6 +688,7 @@ export class TimeKeepingService {
         adjustedMinutes,
         finalMinutes,
         reason: reason || null,
+        // keep status unchanged
       },
       create: {
         staffId,
@@ -615,8 +725,8 @@ export class TimeKeepingService {
     const ctx = normalizeCtx(params.ctx);
     this.ensureApprover(ctx);
 
-    const approverEmail = ctx.userEmail;
-    const approverId = ctx.userId;
+    const approverEmail = ctx.userEmail || 'admin@local';
+    const approverId = ctx.userId || 'admin';
 
     const existing = await this.prisma.officeWeeklyApproval.findUnique({
       where: {
@@ -628,6 +738,7 @@ export class TimeKeepingService {
       },
     });
 
+    // If no record, create with computed = final
     if (!existing) {
       const events = await this.prisma.officeAttendanceEvent.findMany({
         where: {
