@@ -40,6 +40,17 @@ function todayLocal() {
   return DateTime.now().setZone(TZ);
 }
 
+/**
+ * Week range that matches UI (Sun–Sat).
+ */
+function weekRangeSunSat(dt: DateTime) {
+  const d = dt.setZone(TZ);
+  const offset = d.weekday % 7; // Sun=0, Mon=1, ... Sat=6
+  const weekStart = d.startOf('day').minus({ days: offset });
+  const weekEnd = weekStart.plus({ days: 6 }).endOf('day');
+  return { weekStart, weekEnd };
+}
+
 function requireGPS(lat?: number, lng?: number, acc?: number) {
   if (
     typeof lat !== 'number' ||
@@ -70,7 +81,122 @@ export class TimeKeepingService {
     }
   }
 
+  /**
+   * Option A policy:
+   * - DSP is NOT allowed to use office Time Keeping
+   * - Office/Admin/HR/etc. are allowed
+   */
+  private async ensureOfficeEligible(staffId: string) {
+    const emp = await this.prisma.employee.findFirst({
+      where: { employeeId: staffId },
+      select: {
+        employeeId: true,
+        role: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+      },
+    });
+
+    if (!emp) {
+      throw new BadRequestException(
+        'Employee profile not found. Please ensure this office user is linked to an Employee record.',
+      );
+    }
+
+    const role = (emp.role || '').toString().trim().toLowerCase();
+
+    // Strict rule: block DSP explicitly
+    if (role === 'dsp') {
+      throw new ForbiddenException('DSP is not allowed to use Time Keeping.');
+    }
+
+    return emp;
+  }
+
+  private async ensureWeekNotApproved(staffId: string, now: DateTime) {
+    const { weekStart, weekEnd } = weekRangeSunSat(now);
+
+    const approval = await this.prisma.officeWeeklyApproval.findUnique({
+      where: {
+        staffId_weekStart_weekEnd: {
+          staffId,
+          weekStart: weekStart.toJSDate(),
+          weekEnd: weekEnd.toJSDate(),
+        },
+      },
+      select: { status: true },
+    });
+
+    if (approval?.status === 'APPROVED') {
+      throw new ForbiddenException(
+        'This week is already approved. Please ask ADMIN/HR to unlock before making changes.',
+      );
+    }
+  }
+
   // ---- Auto checkout logic (Mon–Fri 5:00 PM) ----
+
+  /**
+   * Auto-close OPEN sessions within a date range.
+   * Used by Admin weekly endpoints to keep computedMinutes accurate.
+   */
+  private async applyAutoCheckoutForRange(from: string, to: string) {
+    const range = weekStartEnd(from, to);
+    if (!range) throw new BadRequestException('Invalid from/to');
+
+    const now = todayLocal();
+
+    const open = await this.prisma.officeAttendanceEvent.findMany({
+      where: {
+        checkOutAt: null,
+        checkInAt: {
+          gte: range.weekStart.toJSDate(),
+          lte: range.weekEnd.toJSDate(),
+        },
+      },
+      orderBy: { checkInAt: 'desc' },
+    });
+
+    if (!open.length) return;
+
+    for (const ev of open) {
+      const inAt = DateTime.fromJSDate(ev.checkInAt).setZone(TZ);
+      const weekday = inAt.weekday; // Mon=1 ... Sun=7
+      const isSatSun = weekday === 6 || weekday === 7;
+
+      // Weekend: policy blocks weekend check-in anyway; do not auto-close here
+      if (isSatSun) continue;
+
+      // Auto-close at 5:00 PM same day if now passed it
+      const closeAt = inAt.set({
+        hour: 17,
+        minute: 0,
+        second: 0,
+        millisecond: 0,
+      });
+
+      if (now < closeAt) continue;
+
+      const flags = Array.isArray(ev.flags) ? ev.flags : [];
+      const newFlags = flags.includes('AUTO_CHECKOUT_5PM')
+        ? flags
+        : [...flags, 'AUTO_CHECKOUT_5PM'];
+
+      await this.prisma.officeAttendanceEvent.update({
+        where: { id: ev.id },
+        data: {
+          checkOutAt: closeAt.toJSDate(),
+          flags: newFlags,
+        },
+      });
+    }
+  }
+
+  /**
+   * Auto-close OPEN sessions for one staffId within a range.
+   * (kept for compatibility with current calls)
+   */
   private async applyAutoCheckoutIfNeeded(
     staffId: string,
     from: string,
@@ -99,16 +225,15 @@ export class TimeKeepingService {
       const weekday = inAt.weekday; // Mon=1 ... Sun=7
       const isSatSun = weekday === 6 || weekday === 7;
 
-      // Weekend: do not auto-close here (policy blocks weekend check-in anyway)
       if (isSatSun) continue;
 
-      // Auto-close at 5:00 PM same day if now passed it
       const closeAt = inAt.set({
         hour: 17,
         minute: 0,
         second: 0,
         millisecond: 0,
       });
+
       if (now < closeAt) continue;
 
       const flags = Array.isArray(ev.flags) ? ev.flags : [];
@@ -128,6 +253,9 @@ export class TimeKeepingService {
 
   async getStatus(params: { staffId: string; from: string; to: string }) {
     const { staffId, from, to } = params;
+
+    // Ensure employee exists & not DSP
+    await this.ensureOfficeEligible(staffId);
 
     await this.applyAutoCheckoutIfNeeded(staffId, from, to);
 
@@ -162,6 +290,10 @@ export class TimeKeepingService {
 
   async getAttendance(params: { staffId: string; from: string; to: string }) {
     const { staffId, from, to } = params;
+
+    // Ensure employee exists & not DSP
+    await this.ensureOfficeEligible(staffId);
+
     const range = weekStartEnd(from, to);
     if (!range) throw new BadRequestException('Invalid from/to');
 
@@ -208,10 +340,14 @@ export class TimeKeepingService {
     accuracy?: number;
     source: 'WEB' | 'MOBILE';
     clientTime?: string;
+    ctx?: AdminCtx;
   }) {
     const { staffId, latitude, longitude, accuracy, source } = params;
 
     requireGPS(latitude, longitude, accuracy);
+
+    // Ensure employee exists & not DSP
+    const emp = await this.ensureOfficeEligible(staffId);
 
     const now = todayLocal();
     const weekday = now.weekday; // Mon=1..Sun=7
@@ -224,6 +360,9 @@ export class TimeKeepingService {
       );
     }
 
+    // Lock rule: if week is approved -> do not allow changes
+    await this.ensureWeekNotApproved(staffId, now);
+
     const open = await this.prisma.officeAttendanceEvent.findFirst({
       where: { staffId, checkOutAt: null },
       orderBy: { checkInAt: 'desc' },
@@ -235,13 +374,10 @@ export class TimeKeepingService {
       );
     }
 
-    // lookup employee to cache staffName/email (optional)
-    const emp = await this.prisma.employee.findFirst({
-      where: { employeeId: staffId },
-      select: { firstName: true, lastName: true, email: true },
-    });
-
-    const staffName = emp ? `${emp.firstName} ${emp.lastName}` : null;
+    const staffName =
+      emp?.firstName && emp?.lastName
+        ? `${emp.firstName} ${emp.lastName}`
+        : null;
 
     const created = await this.prisma.officeAttendanceEvent.create({
       data: {
@@ -267,10 +403,19 @@ export class TimeKeepingService {
     accuracy?: number;
     source: 'WEB' | 'MOBILE';
     clientTime?: string;
+    ctx?: AdminCtx;
   }) {
     const { staffId, latitude, longitude, accuracy } = params;
 
     requireGPS(latitude, longitude, accuracy);
+
+    // Ensure employee exists & not DSP
+    await this.ensureOfficeEligible(staffId);
+
+    const now = todayLocal();
+
+    // Lock rule: if week is approved -> do not allow changes
+    await this.ensureWeekNotApproved(staffId, now);
 
     const open = await this.prisma.officeAttendanceEvent.findFirst({
       where: { staffId, checkOutAt: null },
@@ -280,8 +425,6 @@ export class TimeKeepingService {
     if (!open) {
       throw new BadRequestException('No active check-in found.');
     }
-
-    const now = todayLocal();
 
     await this.prisma.officeAttendanceEvent.update({
       where: { id: open.id },
@@ -311,6 +454,9 @@ export class TimeKeepingService {
 
     const ctx = normalizeCtx(params.ctx);
     this.ensureApprover(ctx);
+
+    // Keep computed minutes accurate
+    await this.applyAutoCheckoutForRange(from, to);
 
     const events = await this.prisma.officeAttendanceEvent.findMany({
       where: {
@@ -391,6 +537,8 @@ export class TimeKeepingService {
         position: meta.position,
         computedMinutes: c.computedMinutes,
         adjustedMinutes: a?.adjustedMinutes ?? null,
+        finalMinutes:
+          a?.finalMinutes ?? a?.adjustedMinutes ?? null ?? c.computedMinutes,
         status: (a?.status || 'PENDING') as 'PENDING' | 'APPROVED',
         approvedBy: a?.approvedByEmail ?? null,
         approvedAt: a?.approvedAt ? a.approvedAt.toISOString() : null,
@@ -426,6 +574,9 @@ export class TimeKeepingService {
 
     const ctx = normalizeCtx(params.ctx);
     this.ensureApprover(ctx);
+
+    // Keep computed minutes accurate
+    await this.applyAutoCheckoutForRange(from, to);
 
     const emp = await this.prisma.employee.findFirst({
       where: { employeeId: staffId },
@@ -491,12 +642,19 @@ export class TimeKeepingService {
     const name = emp ? `${emp.firstName} ${emp.lastName}` : staffId;
     const position = emp?.role || 'Office';
 
+    const finalMinutes =
+      approval?.finalMinutes ??
+      approval?.adjustedMinutes ??
+      null ??
+      computedMinutes;
+
     const row = {
       staffId,
       name,
       position,
       computedMinutes,
       adjustedMinutes: approval?.adjustedMinutes ?? null,
+      finalMinutes,
       status: (approval?.status || 'PENDING') as 'PENDING' | 'APPROVED',
       approvedBy: approval?.approvedByEmail ?? null,
       approvedAt: approval?.approvedAt
@@ -523,6 +681,25 @@ export class TimeKeepingService {
 
     const ctx = normalizeCtx(params.ctx);
     this.ensureApprover(ctx);
+
+    // If already approved -> force unlock first
+    const existing = await this.prisma.officeWeeklyApproval.findUnique({
+      where: {
+        staffId_weekStart_weekEnd: {
+          staffId,
+          weekStart: range.weekStart.toJSDate(),
+          weekEnd: range.weekEnd.toJSDate(),
+        },
+      },
+      select: { id: true, status: true },
+    });
+
+    if (existing?.status === 'APPROVED') {
+      throw new ForbiddenException('Week is approved. Unlock first to adjust.');
+    }
+
+    // Keep computed minutes accurate
+    await this.applyAutoCheckoutForRange(from, to);
 
     // Compute again (source of truth)
     const events = await this.prisma.officeAttendanceEvent.findMany({
@@ -560,7 +737,7 @@ export class TimeKeepingService {
         adjustedMinutes,
         finalMinutes,
         reason: reason || null,
-        // keep status unchanged
+        // keep status unchanged (PENDING)
       },
       create: {
         staffId,
@@ -597,6 +774,9 @@ export class TimeKeepingService {
     const ctx = normalizeCtx(params.ctx);
     this.ensureApprover(ctx);
 
+    // Keep computed minutes accurate
+    await this.applyAutoCheckoutForRange(from, to);
+
     const approverEmail = ctx.userEmail;
     const approverId = ctx.userId;
 
@@ -610,28 +790,28 @@ export class TimeKeepingService {
       },
     });
 
-    // If no record, create with computed = final
-    if (!existing) {
-      const events = await this.prisma.officeAttendanceEvent.findMany({
-        where: {
-          staffId,
-          checkInAt: {
-            gte: range.weekStart.toJSDate(),
-            lte: range.weekEnd.toJSDate(),
-          },
+    // Recompute computedMinutes now (source of truth)
+    const events = await this.prisma.officeAttendanceEvent.findMany({
+      where: {
+        staffId,
+        checkInAt: {
+          gte: range.weekStart.toJSDate(),
+          lte: range.weekEnd.toJSDate(),
         },
-        select: { checkInAt: true, checkOutAt: true },
-      });
+      },
+      select: { checkInAt: true, checkOutAt: true },
+    });
 
-      let computedMinutes = 0;
-      for (const ev of events) {
-        const inAt = DateTime.fromJSDate(ev.checkInAt).setZone(TZ);
-        const outAt = ev.checkOutAt
-          ? DateTime.fromJSDate(ev.checkOutAt).setZone(TZ)
-          : null;
-        if (outAt) computedMinutes += minutesBetween(inAt, outAt);
-      }
+    let computedMinutes = 0;
+    for (const ev of events) {
+      const inAt = DateTime.fromJSDate(ev.checkInAt).setZone(TZ);
+      const outAt = ev.checkOutAt
+        ? DateTime.fromJSDate(ev.checkOutAt).setZone(TZ)
+        : null;
+      if (outAt) computedMinutes += minutesBetween(inAt, outAt);
+    }
 
+    if (!existing) {
       const created = await this.prisma.officeWeeklyApproval.create({
         data: {
           staffId,
@@ -652,12 +832,20 @@ export class TimeKeepingService {
         ok: true,
         status: created.status,
         finalMinutes: created.finalMinutes,
+        computedMinutes: created.computedMinutes,
       };
     }
+
+    // Determine final minutes correctly
+    const adjustedMinutes = existing.adjustedMinutes ?? null;
+    const finalMinutes =
+      adjustedMinutes !== null ? adjustedMinutes : computedMinutes;
 
     const updated = await this.prisma.officeWeeklyApproval.update({
       where: { id: existing.id },
       data: {
+        computedMinutes,
+        finalMinutes,
         status: 'APPROVED',
         approvedByUserId: approverId,
         approvedByEmail: approverEmail,
@@ -670,6 +858,7 @@ export class TimeKeepingService {
       ok: true,
       status: updated.status,
       finalMinutes: updated.finalMinutes,
+      computedMinutes: updated.computedMinutes,
     };
   }
 

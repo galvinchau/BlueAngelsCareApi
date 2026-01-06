@@ -73,8 +73,15 @@ export class TimeKeepingController {
   }
 
   @Post('check-in')
-  async checkIn(@Body() body: CheckBody) {
+  async checkIn(@Req() req: Request, @Body() body: CheckBody) {
     if (!body?.staffId) throw new BadRequestException('Missing staffId');
+
+    const ctx = readCtx(req, {
+      userType: body.userType,
+      userEmail: body.userEmail,
+      userId: body.userId,
+    });
+
     return this.svc.checkIn({
       staffId: body.staffId,
       latitude: body.latitude,
@@ -82,12 +89,20 @@ export class TimeKeepingController {
       accuracy: body.accuracy,
       source: body.source || 'WEB',
       clientTime: body.clientTime,
+      ctx,
     });
   }
 
   @Post('check-out')
-  async checkOut(@Body() body: CheckBody) {
+  async checkOut(@Req() req: Request, @Body() body: CheckBody) {
     if (!body?.staffId) throw new BadRequestException('Missing staffId');
+
+    const ctx = readCtx(req, {
+      userType: body.userType,
+      userEmail: body.userEmail,
+      userId: body.userId,
+    });
+
     return this.svc.checkOut({
       staffId: body.staffId,
       latitude: body.latitude,
@@ -95,6 +110,7 @@ export class TimeKeepingController {
       accuracy: body.accuracy,
       source: body.source || 'WEB',
       clientTime: body.clientTime,
+      ctx,
     });
   }
 
