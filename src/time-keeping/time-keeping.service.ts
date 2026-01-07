@@ -1,3 +1,4 @@
+// src/time-keeping/time-keeping.service.ts
 import {
   BadRequestException,
   ForbiddenException,
@@ -53,12 +54,26 @@ function requireGPS(lat?: number, lng?: number, acc?: number) {
   }
 }
 
+/**
+ * IMPORTANT (Audit):
+ * - For admin actions (approve/adjust/unlock), we must ALWAYS know who did it.
+ * - Do NOT default userEmail to admin@local.
+ * - If ctx.userEmail is missing => throw 400 so we can fix the caller (web/api).
+ */
 function normalizeCtx(ctx?: AdminCtx): AdminCtx {
-  return {
-    userType: (ctx?.userType || 'ADMIN').toString(),
-    userEmail: (ctx?.userEmail || 'admin@local').toString(),
-    userId: (ctx?.userId || 'admin').toString(),
-  };
+  const userType = ((ctx?.userType || '').toString().trim() ||
+    'ADMIN') as string;
+
+  const userEmail = (ctx?.userEmail || '').toString().trim();
+  if (!userEmail) {
+    throw new BadRequestException(
+      'Missing userEmail context. Cannot audit approve/adjust actions.',
+    );
+  }
+
+  const userId = (ctx?.userId || '').toString().trim();
+
+  return { userType, userEmail, userId };
 }
 
 function isOfficeRole(role?: string | null) {
@@ -88,12 +103,18 @@ export class TimeKeepingService {
    * - If missing: resolve by ctx.userEmail => Employee.email => employee.employeeId
    */
   private async resolveStaffIdForSelf(staffId?: string, ctx?: AdminCtx) {
-    const c = normalizeCtx(ctx);
+    // NOTE:
+    // Self endpoints may call with missing ctx in early phases.
+    // We only need userEmail for resolving staffId by email.
+    const userType = (ctx?.userType || 'ADMIN').toString();
+    const userEmail = (ctx?.userEmail || '').toString();
+    const userId = (ctx?.userId || '').toString();
+    const c = { userType, userEmail, userId };
 
     if (staffId && staffId.trim()) return staffId.trim();
 
     const email = (c.userEmail || '').trim().toLowerCase();
-    if (!email || email === 'admin@local') {
+    if (!email) {
       throw new BadRequestException(
         'Missing staffId. Cannot resolve by userEmail.',
       );

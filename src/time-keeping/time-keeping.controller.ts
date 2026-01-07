@@ -34,11 +34,19 @@ function readCtx(
   const hUserEmail = (req.headers['x-user-email'] as string) || '';
   const hUserId = (req.headers['x-user-id'] as string) || '';
 
-  const userType =
-    (hUserType || fallback?.userType || '').toString() || 'ADMIN';
-  const userEmail =
-    (hUserEmail || fallback?.userEmail || '').toString() || 'admin@local';
-  const userId = (hUserId || fallback?.userId || '').toString() || 'admin';
+  const userType = ((hUserType || fallback?.userType || '').toString().trim() ||
+    'ADMIN') as string;
+
+  // ✅ HARD REQUIREMENT: must know who is calling (for audit)
+  const userEmail = (hUserEmail || fallback?.userEmail || '').toString().trim();
+  if (!userEmail) {
+    throw new BadRequestException(
+      'Missing userEmail context. Provide header "x-user-email" or body/query "userEmail".',
+    );
+  }
+
+  // userId is nice-to-have; if missing, keep empty string (no fake default)
+  const userId = (hUserId || fallback?.userId || '').toString().trim();
 
   return { userType, userEmail, userId };
 }
