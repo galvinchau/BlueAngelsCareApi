@@ -1,4 +1,3 @@
-// src/time-keeping/time-keeping.service.ts
 import {
   BadRequestException,
   ForbiddenException,
@@ -15,6 +14,40 @@ type AdminCtx = {
   userType: string; // ADMIN | HR | ...
   userEmail: string;
   userId: string;
+};
+
+type DailyAdjInput = { date: string; minutes: number | null };
+
+type WeeklyRow = {
+  staffId: string;
+  name: string;
+  position: string;
+  computedMinutes: number;
+  adjustedMinutes: number | null; // legacy weekly adjusted (optional)
+  finalMinutes: number;
+  status: 'PENDING' | 'APPROVED';
+  approvedBy: string | null; // email
+  approvedByName: string | null; // ✅ name
+  approvedAt: string | null; // iso
+  flagsCount: number;
+};
+
+type DailySummaryRow = {
+  date: string; // YYYY-MM-DD
+  computedMinutes: number;
+  adjustedMinutes: number | null;
+  resultMinutes: number;
+};
+
+// ✅ Typed shape for approvals to avoid Map<never, never>
+type ApprovalLite = {
+  staffId: string;
+  status: 'PENDING' | 'APPROVED';
+  adjustedMinutes: number | null;
+  finalMinutes: number;
+  approvedByEmail: string | null;
+  approvedAt: Date | null;
+  dailyAdjustments: any; // Json
 };
 
 function parseISODateOnly(s: string) {
@@ -78,13 +111,34 @@ function normalizeCtx(ctx?: AdminCtx): AdminCtx {
 
 function isOfficeRole(role?: string | null) {
   const r = (role || '').trim().toLowerCase();
-  // Accept a few variants
   return (
     r === 'office staff' ||
     r === 'office' ||
     r === 'officestaff' ||
     r === 'office_staff'
   );
+}
+
+// ✅ Normalize day key (YYYY-MM-DD) in TZ
+function dayKeyFromJSDate(d: Date) {
+  return DateTime.fromJSDate(d).setZone(TZ).toISODate()!;
+}
+
+function safeNumber(x: any): number | null {
+  if (typeof x !== 'number') return null;
+  if (!Number.isFinite(x)) return null;
+  return x;
+}
+
+// ✅ Read stored dailyAdjustments from DB (Json) safely
+function readDailyAdjustmentsJson(x: any): Record<string, number | null> {
+  if (!x || typeof x !== 'object') return {};
+  const out: Record<string, number | null> = {};
+  for (const [k, v] of Object.entries(x)) {
+    const n = safeNumber(v);
+    out[k] = n === null ? null : Math.round(n);
+  }
+  return out;
 }
 
 @Injectable()
@@ -103,9 +157,6 @@ export class TimeKeepingService {
    * - If missing: resolve by ctx.userEmail => Employee.email => employee.employeeId
    */
   private async resolveStaffIdForSelf(staffId?: string, ctx?: AdminCtx) {
-    // NOTE:
-    // Self endpoints may call with missing ctx in early phases.
-    // We only need userEmail for resolving staffId by email.
     const userType = (ctx?.userType || 'ADMIN').toString();
     const userEmail = (ctx?.userEmail || '').toString();
     const userId = (ctx?.userId || '').toString();
@@ -137,7 +188,6 @@ export class TimeKeepingService {
       );
     }
 
-    // Enforce Office Staff only
     if (!isOfficeRole(emp.role)) {
       throw new ForbiddenException('Time Keeping is for Office staff only.');
     }
@@ -145,10 +195,6 @@ export class TimeKeepingService {
     return emp.employeeId;
   }
 
-  /**
-   * Ensure staffId belongs to an Employee with Office role.
-   * (Option A: no DSP in Time Keeping)
-   */
   private async ensureOfficeStaffById(staffId: string) {
     const emp = await this.prisma.employee.findFirst({
       where: { employeeId: staffId },
@@ -166,61 +212,32 @@ export class TimeKeepingService {
     }
   }
 
-  // ---- Auto checkout logic (Mon–Fri 5:00 PM) ----
-  private async applyAutoCheckoutIfNeeded(
+  // ✅ NEW: if week is APPROVED, block check-in until unlocked
+  private async ensureWeekNotApprovedForCheckIn(
     staffId: string,
-    from: string,
-    to: string,
+    now: DateTime,
   ) {
-    const range = weekStartEnd(from, to);
-    if (!range) throw new BadRequestException('Invalid from/to');
-    const now = todayLocal();
+    // week starts Sunday
+    const weekStart = now.startOf('day').minus({ days: now.weekday % 7 }); // Sun=0
+    const weekEnd = weekStart.plus({ days: 6 }).endOf('day');
 
-    const open = await this.prisma.officeAttendanceEvent.findMany({
+    const existing = await this.prisma.officeWeeklyApproval.findUnique({
       where: {
-        staffId,
-        checkOutAt: null,
-        checkInAt: {
-          gte: range.weekStart.toJSDate(),
-          lte: range.weekEnd.toJSDate(),
+        staffId_weekStart_weekEnd: {
+          staffId,
+          weekStart: weekStart.toJSDate(),
+          weekEnd: weekEnd.toJSDate(),
         },
       },
-      orderBy: { checkInAt: 'desc' },
+      select: { status: true },
     });
 
-    if (!open.length) return;
-
-    for (const ev of open) {
-      const inAt = DateTime.fromJSDate(ev.checkInAt).setZone(TZ);
-      const weekday = inAt.weekday; // Mon=1 ... Sun=7
-      const isSatSun = weekday === 6 || weekday === 7;
-
-      // Weekend: do not auto-close here (policy blocks weekend check-in anyway)
-      if (isSatSun) continue;
-
-      // Auto-close at 5:00 PM same day if now passed it
-      const closeAt = inAt.set({
-        hour: 17,
-        minute: 0,
-        second: 0,
-        millisecond: 0,
-      });
-      if (now < closeAt) continue;
-
-      const flags = Array.isArray(ev.flags) ? ev.flags : [];
-      const newFlags = flags.includes('AUTO_CHECKOUT_5PM')
-        ? flags
-        : [...flags, 'AUTO_CHECKOUT_5PM'];
-
-      await this.prisma.officeAttendanceEvent.update({
-        where: { id: ev.id },
-        data: {
-          checkOutAt: closeAt.toJSDate(),
-          flags: newFlags,
-        },
-      });
+    if (existing?.status === 'APPROVED') {
+      throw new ForbiddenException('Week is approved. Ask Admin/HR to unlock.');
     }
   }
+
+  // =================== SELF ===================
 
   async getStatus(params: {
     staffId?: string;
@@ -230,16 +247,11 @@ export class TimeKeepingService {
   }) {
     const { from, to } = params;
 
-    // ✅ resolve staffId by email if needed
     const staffId = await this.resolveStaffIdForSelf(
       params.staffId,
       params.ctx,
     );
-
-    // ✅ double enforce by staffId (safety)
     await this.ensureOfficeStaffById(staffId);
-
-    await this.applyAutoCheckoutIfNeeded(staffId, from, to);
 
     const latest = await this.prisma.officeAttendanceEvent.findFirst({
       where: { staffId },
@@ -287,8 +299,6 @@ export class TimeKeepingService {
     const range = weekStartEnd(from, to);
     if (!range) throw new BadRequestException('Invalid from/to');
 
-    await this.applyAutoCheckoutIfNeeded(staffId, from, to);
-
     const events = await this.prisma.officeAttendanceEvent.findMany({
       where: {
         staffId,
@@ -330,13 +340,12 @@ export class TimeKeepingService {
     accuracy?: number;
     source: 'WEB' | 'MOBILE';
     clientTime?: string;
-    ctx?: AdminCtx; // ✅ added to fix TS + allow resolve by email
+    ctx?: AdminCtx;
   }) {
     const { latitude, longitude, accuracy, source } = params;
 
     requireGPS(latitude, longitude, accuracy);
 
-    // ✅ resolve staffId by email if needed
     const staffId = await this.resolveStaffIdForSelf(
       params.staffId,
       params.ctx,
@@ -344,15 +353,9 @@ export class TimeKeepingService {
     await this.ensureOfficeStaffById(staffId);
 
     const now = todayLocal();
-    const weekday = now.weekday; // Mon=1..Sun=7
-    const isWeekend = weekday === 6 || weekday === 7;
 
-    // Policy: Office staff cannot work weekends -> block
-    if (isWeekend) {
-      throw new ForbiddenException(
-        'Weekend check-in is not allowed for Office staff.',
-      );
-    }
+    // ✅ Option 1: If week already approved => block new attendance
+    await this.ensureWeekNotApprovedForCheckIn(staffId, now);
 
     const open = await this.prisma.officeAttendanceEvent.findFirst({
       where: { staffId, checkOutAt: null },
@@ -365,7 +368,6 @@ export class TimeKeepingService {
       );
     }
 
-    // lookup employee to cache staffName/email (optional)
     const emp = await this.prisma.employee.findFirst({
       where: { employeeId: staffId },
       select: { firstName: true, lastName: true, email: true },
@@ -397,7 +399,7 @@ export class TimeKeepingService {
     accuracy?: number;
     source: 'WEB' | 'MOBILE';
     clientTime?: string;
-    ctx?: AdminCtx; // ✅ added
+    ctx?: AdminCtx;
   }) {
     const { latitude, longitude, accuracy } = params;
 
@@ -434,6 +436,36 @@ export class TimeKeepingService {
   }
 
   // =================== ADMIN/HR Approval ===================
+
+  private async getApproverNameByEmail(email?: string | null) {
+    const e = (email || '').trim().toLowerCase();
+    if (!e) return null;
+
+    const emp = await this.prisma.employee.findFirst({
+      where: { email: e },
+      select: { firstName: true, lastName: true },
+    });
+    if (!emp) return null;
+
+    const name = `${emp.firstName} ${emp.lastName}`.trim();
+    return name || null;
+  }
+
+  private computeDailyComputedFromEvents(
+    events: Array<{ checkInAt: Date; checkOutAt: Date | null }>,
+  ) {
+    const byDay = new Map<string, number>();
+    for (const ev of events) {
+      const day = dayKeyFromJSDate(ev.checkInAt);
+      const inAt = DateTime.fromJSDate(ev.checkInAt).setZone(TZ);
+      const outAt = ev.checkOutAt
+        ? DateTime.fromJSDate(ev.checkOutAt).setZone(TZ)
+        : null;
+      const mins = outAt ? minutesBetween(inAt, outAt) : 0;
+      byDay.set(day, (byDay.get(day) || 0) + mins);
+    }
+    return byDay;
+  }
 
   async adminListWeekly(params: {
     from: string;
@@ -485,17 +517,28 @@ export class TimeKeepingService {
       ]),
     );
 
-    const approvals = await this.prisma.officeWeeklyApproval.findMany({
+    // ✅ FIX (never): force typed approvals + typed Map key/value
+    const approvals = (await this.prisma.officeWeeklyApproval.findMany({
       where: {
         weekStart: range.weekStart.toJSDate(),
         weekEnd: range.weekEnd.toJSDate(),
         staffId: { in: staffIds },
       },
-    });
+      select: {
+        staffId: true,
+        status: true,
+        adjustedMinutes: true,
+        finalMinutes: true,
+        approvedByEmail: true,
+        approvedAt: true,
+        dailyAdjustments: true as any, // ✅ Json
+      } as any,
+    } as any)) as unknown as ApprovalLite[];
 
-    const appMap = new Map(approvals.map((a) => [a.staffId, a]));
+    const appMap = new Map<string, ApprovalLite>();
+    for (const a of approvals) appMap.set(a.staffId, a);
 
-    // compute minutes + flags count
+    // computed minutes + flags count
     const agg = new Map<
       string,
       { computedMinutes: number; flagsCount: number }
@@ -517,29 +560,39 @@ export class TimeKeepingService {
       agg.set(ev.staffId, prev);
     }
 
-    const rows = staffIds.map((staffId) => {
-      const a = appMap.get(staffId);
+    const rows: WeeklyRow[] = [];
+
+    for (const staffId of staffIds) {
+      const a = appMap.get(staffId) ?? null;
       const c = agg.get(staffId) || { computedMinutes: 0, flagsCount: 0 };
       const meta = empMap.get(staffId) || { name: staffId, position: 'Office' };
 
-      // ✅ Option A: finalMinutes should come from approval if exists,
-      // else computedMinutes
-      const finalMinutes =
-        a?.finalMinutes ?? a?.adjustedMinutes ?? c.computedMinutes;
+      const approvedByEmail = (a?.approvedByEmail ?? null) as string | null;
+      const approvedByName = await this.getApproverNameByEmail(approvedByEmail);
 
-      return {
+      const finalMinutes =
+        (typeof a?.finalMinutes === 'number'
+          ? a.finalMinutes
+          : typeof a?.adjustedMinutes === 'number'
+            ? a.adjustedMinutes
+            : null) ?? c.computedMinutes;
+
+      rows.push({
         staffId,
         name: meta.name,
         position: meta.position,
         computedMinutes: c.computedMinutes,
-        adjustedMinutes: a?.adjustedMinutes ?? null,
+        adjustedMinutes:
+          typeof a?.adjustedMinutes === 'number' ? a.adjustedMinutes : null,
         finalMinutes,
-        status: (a?.status || 'PENDING') as 'PENDING' | 'APPROVED',
-        approvedBy: a?.approvedByEmail ?? null,
-        approvedAt: a?.approvedAt ? a.approvedAt.toISOString() : null,
+        status:
+          ((a?.status || 'PENDING') as 'PENDING' | 'APPROVED') || 'PENDING',
+        approvedBy: approvedByEmail,
+        approvedByName,
+        approvedAt: a?.approvedAt ? new Date(a.approvedAt).toISOString() : null,
         flagsCount: c.flagsCount,
-      };
-    });
+      });
+    }
 
     const filtered = rows.filter((r) => {
       const q2 = q.trim().toLowerCase();
@@ -621,7 +674,7 @@ export class TimeKeepingService {
       };
     });
 
-    const approval = await this.prisma.officeWeeklyApproval.findUnique({
+    const approval = (await this.prisma.officeWeeklyApproval.findUnique({
       where: {
         staffId_weekStart_weekEnd: {
           staffId,
@@ -629,33 +682,79 @@ export class TimeKeepingService {
           weekEnd: range.weekEnd.toJSDate(),
         },
       },
-    });
+      select: {
+        adjustedMinutes: true,
+        finalMinutes: true,
+        computedMinutes: true,
+        status: true,
+        approvedByEmail: true,
+        approvedAt: true,
+        dailyAdjustments: true as any, // ✅ Json
+      } as any,
+    } as any)) as unknown as
+      | (ApprovalLite & {
+          computedMinutes?: number;
+        })
+      | null;
 
     const name = emp ? `${emp.firstName} ${emp.lastName}` : staffId;
     const position = emp?.role || 'Office';
 
-    const finalMinutes =
-      approval?.finalMinutes ??
-      approval?.adjustedMinutes ??
-      approval?.computedMinutes ??
-      computedMinutes;
+    const dailyComputedMap = this.computeDailyComputedFromEvents(
+      events.map((e) => ({ checkInAt: e.checkInAt, checkOutAt: e.checkOutAt })),
+    );
+
+    const days: string[] = [];
+    const cur = range.weekStart.startOf('day');
+    for (let i = 0; i < 7; i++) {
+      days.push(cur.plus({ days: i }).toISODate()!);
+    }
+
+    const storedDaily = readDailyAdjustmentsJson(approval?.dailyAdjustments);
+
+    const daily: DailySummaryRow[] = days.map((d) => {
+      const computed = dailyComputedMap.get(d) || 0;
+      const adj = typeof storedDaily[d] === 'number' ? storedDaily[d] : null;
+      const result = adj === null ? computed : adj;
+      return {
+        date: d,
+        computedMinutes: computed,
+        adjustedMinutes: adj,
+        resultMinutes: result,
+      };
+    });
+
+    const totalAfterAdjustedMinutes = daily.reduce(
+      (sum, r) => sum + (r.resultMinutes || 0),
+      0,
+    );
+
+    const approvedByEmail = (approval?.approvedByEmail ?? null) as
+      | string
+      | null;
+    const approvedByName = await this.getApproverNameByEmail(approvedByEmail);
 
     const row = {
       staffId,
       name,
       position,
       computedMinutes,
-      adjustedMinutes: approval?.adjustedMinutes ?? null,
-      finalMinutes,
+      adjustedMinutes: approval?.adjustedMinutes ?? null, // legacy
+      finalMinutes:
+        (typeof approval?.finalMinutes === 'number'
+          ? approval.finalMinutes
+          : null) ?? totalAfterAdjustedMinutes,
+      totalAfterAdjustedMinutes, // ✅ used by UI
       status: (approval?.status || 'PENDING') as 'PENDING' | 'APPROVED',
-      approvedBy: approval?.approvedByEmail ?? null,
+      approvedBy: approvedByEmail,
+      approvedByName,
       approvedAt: approval?.approvedAt
-        ? approval.approvedAt.toISOString()
+        ? new Date(approval.approvedAt).toISOString()
         : null,
       flagsCount,
+      daily, // ✅ new
     };
 
-    // ✅ IMPORTANT: return shape for Web modal: { row, attendance }
     return { row, attendance };
   }
 
@@ -663,18 +762,19 @@ export class TimeKeepingService {
     staffId: string;
     from: string;
     to: string;
-    adjustedMinutes: number;
+    dailyAdjustments: DailyAdjInput[];
+    adjustedMinutes: number | null; // legacy
     reason: string;
     ctx?: AdminCtx;
   }) {
-    const { staffId, from, to, adjustedMinutes, reason } = params;
+    const { staffId, from, to, dailyAdjustments, adjustedMinutes, reason } =
+      params;
     const range = weekStartEnd(from, to);
     if (!range) throw new BadRequestException('Invalid from/to');
 
     const ctx = normalizeCtx(params.ctx);
     this.ensureApprover(ctx);
 
-    // Compute again (source of truth)
     const events = await this.prisma.officeAttendanceEvent.findMany({
       where: {
         staffId,
@@ -695,8 +795,46 @@ export class TimeKeepingService {
       if (outAt) computedMinutes += minutesBetween(inAt, outAt);
     }
 
-    // Option A: adjustedMinutes becomes finalMinutes
-    const finalMinutes = adjustedMinutes;
+    const dailyAdjJson: Record<string, number | null> = {};
+    if (Array.isArray(dailyAdjustments) && dailyAdjustments.length) {
+      for (const x of dailyAdjustments) {
+        const d = (x?.date || '').toString().trim();
+        const dt = parseISODateOnly(d);
+        if (!dt) continue;
+
+        if (x.minutes === null || x.minutes === undefined) {
+          dailyAdjJson[dt.toISODate()!] = null;
+          continue;
+        }
+        if (!Number.isFinite(Number(x.minutes)) || Number(x.minutes) < 0) {
+          throw new BadRequestException(
+            'dailyAdjustments.minutes must be >= 0',
+          );
+        }
+        dailyAdjJson[dt.toISODate()!] = Math.round(Number(x.minutes));
+      }
+    }
+
+    const dailyComputedMap = this.computeDailyComputedFromEvents(events);
+
+    const days: string[] = [];
+    const cur = range.weekStart.startOf('day');
+    for (let i = 0; i < 7; i++) {
+      days.push(cur.plus({ days: i }).toISODate()!);
+    }
+
+    let totalAfterAdjustedMinutes = 0;
+    for (const d of days) {
+      const computed = dailyComputedMap.get(d) || 0;
+      const adj = typeof dailyAdjJson[d] === 'number' ? dailyAdjJson[d] : null;
+      totalAfterAdjustedMinutes += adj === null ? computed : adj;
+    }
+
+    const finalMinutes = dailyAdjustments?.length
+      ? totalAfterAdjustedMinutes
+      : typeof adjustedMinutes === 'number'
+        ? Math.round(adjustedMinutes)
+        : computedMinutes;
 
     const up = await this.prisma.officeWeeklyApproval.upsert({
       where: {
@@ -708,29 +846,37 @@ export class TimeKeepingService {
       },
       update: {
         computedMinutes,
-        adjustedMinutes,
+        adjustedMinutes: dailyAdjustments?.length
+          ? null
+          : typeof adjustedMinutes === 'number'
+            ? Math.round(adjustedMinutes)
+            : null,
         finalMinutes,
         reason: reason || null,
-        // keep status unchanged
-      },
+        dailyAdjustments: dailyAdjJson as any,
+      } as any,
       create: {
         staffId,
         weekStart: range.weekStart.toJSDate(),
         weekEnd: range.weekEnd.toJSDate(),
         computedMinutes,
-        adjustedMinutes,
+        adjustedMinutes: dailyAdjustments?.length
+          ? null
+          : typeof adjustedMinutes === 'number'
+            ? Math.round(adjustedMinutes)
+            : null,
         finalMinutes,
         status: 'PENDING',
         reason: reason || null,
-      },
-    });
+        dailyAdjustments: dailyAdjJson as any,
+      } as any,
+    } as any);
 
     return {
       ok: true,
-      computedMinutes: up.computedMinutes,
-      adjustedMinutes: up.adjustedMinutes,
-      finalMinutes: up.finalMinutes,
-      status: up.status,
+      computedMinutes: (up as any).computedMinutes,
+      finalMinutes: (up as any).finalMinutes,
+      status: (up as any).status,
     };
   }
 
@@ -751,7 +897,7 @@ export class TimeKeepingService {
     const approverEmail = ctx.userEmail;
     const approverId = ctx.userId;
 
-    const existing = await this.prisma.officeWeeklyApproval.findUnique({
+    const existing = (await this.prisma.officeWeeklyApproval.findUnique({
       where: {
         staffId_weekStart_weekEnd: {
           staffId,
@@ -759,9 +905,14 @@ export class TimeKeepingService {
           weekEnd: range.weekEnd.toJSDate(),
         },
       },
-    });
+      select: {
+        id: true,
+        finalMinutes: true,
+        reason: true,
+        dailyAdjustments: true as any,
+      } as any,
+    } as any)) as unknown as { id: string; reason: string | null } | null;
 
-    // If no record, create with computed = final
     if (!existing) {
       const events = await this.prisma.officeAttendanceEvent.findMany({
         where: {
@@ -796,13 +947,14 @@ export class TimeKeepingService {
           approvedByEmail: approverEmail,
           approvedAt: todayLocal().toJSDate(),
           reason: reason || null,
+          dailyAdjustments: {} as any,
         },
-      });
+      } as any);
 
       return {
         ok: true,
-        status: created.status,
-        finalMinutes: created.finalMinutes,
+        status: (created as any).status,
+        finalMinutes: (created as any).finalMinutes,
       };
     }
 
@@ -819,8 +971,8 @@ export class TimeKeepingService {
 
     return {
       ok: true,
-      status: updated.status,
-      finalMinutes: updated.finalMinutes,
+      status: (updated as any).status,
+      finalMinutes: (updated as any).finalMinutes,
     };
   }
 
@@ -846,6 +998,7 @@ export class TimeKeepingService {
           weekEnd: range.weekEnd.toJSDate(),
         },
       },
+      select: { id: true },
     });
 
     if (!existing) {
@@ -863,6 +1016,6 @@ export class TimeKeepingService {
       },
     });
 
-    return { ok: true, status: updated.status };
+    return { ok: true, status: (updated as any).status };
   }
 }

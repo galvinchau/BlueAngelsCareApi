@@ -196,7 +196,12 @@ export class TimeKeepingController {
     body: {
       from: string;
       to: string;
-      adjustedMinutes: number;
+
+      // ✅ NEW: per-day adjustments (minutes)
+      dailyAdjustments?: Array<{ date: string; minutes: number | null }>;
+      // optional legacy
+      adjustedMinutes?: number;
+
       reason?: string;
 
       // fallback ctx
@@ -207,9 +212,6 @@ export class TimeKeepingController {
   ) {
     if (!body?.from || !body?.to)
       throw new BadRequestException('Missing from/to');
-    if (!Number.isFinite(body.adjustedMinutes) || body.adjustedMinutes < 0) {
-      throw new BadRequestException('adjustedMinutes must be >= 0');
-    }
 
     const ctx = readCtx(req, {
       userType: body.userType,
@@ -221,7 +223,13 @@ export class TimeKeepingController {
       staffId,
       from: body.from,
       to: body.to,
-      adjustedMinutes: Math.round(body.adjustedMinutes),
+      // ✅ pass per-day adjustments
+      dailyAdjustments: Array.isArray(body.dailyAdjustments)
+        ? body.dailyAdjustments
+        : [],
+      // legacy (not used if dailyAdjustments provided)
+      adjustedMinutes:
+        typeof body.adjustedMinutes === 'number' ? body.adjustedMinutes : null,
       reason: body.reason || '',
       ctx,
     });

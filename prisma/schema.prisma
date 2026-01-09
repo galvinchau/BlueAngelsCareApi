@@ -896,15 +896,18 @@ model OfficeAttendanceEvent {
 model OfficeWeeklyApproval {
   id String @id @default(cuid())
 
-  staffId String
-
-  // weekStart = Sunday 00:00, weekEnd = Saturday 23:59:59 (America/New_York)
+  staffId   String
   weekStart DateTime
   weekEnd   DateTime
 
   computedMinutes Int @default(0)
   adjustedMinutes Int?
   finalMinutes    Int @default(0)
+
+  // ✅ NEW – per-day adjustment map
+  // IMPORTANT: Canonical table is "OfficeWeeklyApproval" (camelCase)
+  // so the column is dailyAdjustments (camelCase), NOT daily_adjustments.
+  dailyAdjustments Json?
 
   status OfficeWeeklyApprovalStatus @default(PENDING)
 
@@ -917,7 +920,12 @@ model OfficeWeeklyApproval {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([staffId, weekStart, weekEnd])
+  // ✅ Keep the compound unique name to match service code:
+  // where: { staffId_weekStart_weekEnd: { ... } }
+  @@unique([staffId, weekStart, weekEnd], name: "staffId_weekStart_weekEnd")
   @@index([weekStart, weekEnd])
   @@index([status])
+
+  // ✅ FIX: Point Prisma to the correct table
+  @@map("OfficeWeeklyApproval")
 }
