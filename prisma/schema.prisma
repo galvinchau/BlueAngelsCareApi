@@ -929,3 +929,72 @@ model OfficeWeeklyApproval {
   // ✅ FIX: Point Prisma to the correct table
   @@map("OfficeWeeklyApproval")
 }
+
+// =====================================================
+//  PAYROLL (Runs, Rows, Rates)
+// =====================================================
+
+model PayrollRate {
+  id String @id @default(cuid())
+
+  // Match Employee.employeeId (BAC-E-...)
+  employeeId String @unique
+
+  rate         Float?
+  trainingRate Float? // default 10 if null
+  mileageRate  Float? // default 0.30 if null
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([employeeId])
+}
+
+model PayrollRun {
+  id String @id @default(cuid())
+
+  periodFrom String // YYYY-MM-DD
+  periodTo   String // YYYY-MM-DD
+  generatedAt DateTime @default(now())
+
+  totalsTotalHours   Float @default(0)
+  totalsTotalOtHours Float @default(0)
+  totalsTotalPay     Float @default(0)
+
+  rows PayrollRow[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([periodFrom, periodTo])
+}
+
+model PayrollRow {
+  id String @id @default(cuid())
+
+  runId String
+  run   PayrollRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  staffId   String // Employee.employeeId (BAC-E-...)
+  staffName String
+  staffType String // "DSP" | "OFFICE"
+
+  employeeSSN String?
+
+  rate        Float
+  trainingRate Float?
+  mileageRate  Float?
+
+  hours      Float
+  otHours    Float
+  regularPay Float
+  otPay      Float
+  totalPay   Float
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([runId])
+  @@index([staffId])
+  @@index([staffType])
+}
