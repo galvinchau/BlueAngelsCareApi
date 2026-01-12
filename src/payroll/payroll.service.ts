@@ -1,3 +1,4 @@
+// src/payroll/payroll.service.ts
 import { BadRequestException, Injectable } from '@nestjs/common';
 import type { Request } from 'express';
 import { DateTime } from 'luxon';
@@ -5,7 +6,9 @@ import * as fs from 'fs-extra';
 import * as path from 'path';
 import {
   AlignmentType,
+  BorderStyle,
   Document,
+  ImageRun,
   Packer,
   Paragraph,
   Table,
@@ -19,6 +22,21 @@ import { PrismaService } from '../prisma/prisma.service';
 import type { PayrollExportDto } from './dto/payroll-export.dto';
 
 const TZ = 'America/New_York';
+
+// =========================
+// Company header (customize via ENV)
+// =========================
+const COMPANY_NAME =
+  process.env.PAYROLL_COMPANY_NAME || 'Blue Angels Care, LLC';
+const COMPANY_ADDRESS =
+  process.env.PAYROLL_COMPANY_ADDRESS || '202 Campbell Ave, Altoona, PA 16602';
+const COMPANY_PHONE = process.env.PAYROLL_COMPANY_PHONE || '(814) 600-2313';
+
+// Optional: absolute or relative path to a logo file (png/jpg)
+// Example: PAYROLL_COMPANY_LOGO_PATH=uploads/assets/logo.png
+const COMPANY_LOGO_PATH = (process.env.PAYROLL_COMPANY_LOGO_PATH || '')
+  .toString()
+  .trim();
 
 function clampNonNeg(n: any) {
   const x = Number(n);
@@ -47,6 +65,33 @@ function inferStaffType(role?: string | null): 'DSP' | 'OFFICE' {
   return 'OFFICE';
 }
 
+// ✅ NEW: detect png/jpg from buffer (docx ImageRun requires "type")
+function detectImageType(buf: Buffer): 'png' | 'jpg' {
+  // PNG magic: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    buf &&
+    buf.length >= 8 &&
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47 &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a &&
+    buf[6] === 0x1a &&
+    buf[7] === 0x0a
+  ) {
+    return 'png';
+  }
+
+  // JPG magic: FF D8
+  if (buf && buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xd8) {
+    return 'jpg';
+  }
+
+  // default safe
+  return 'png';
+}
+
 @Injectable()
 export class PayrollService {
   constructor(private readonly prisma: PrismaService) {}
@@ -67,6 +112,35 @@ export class PayrollService {
 
   private async ensureExportsDir() {
     await fs.ensureDir(this.exportsDir());
+  }
+
+  private resolveLogoPath() {
+    if (!COMPANY_LOGO_PATH) return null;
+    const p = path.isAbsolute(COMPANY_LOGO_PATH)
+      ? COMPANY_LOGO_PATH
+      : path.join(process.cwd(), COMPANY_LOGO_PATH);
+    return p;
+  }
+
+  private async tryLoadLogoBuffer(): Promise<Buffer | null> {
+    try {
+      const p = this.resolveLogoPath();
+      if (!p) return null;
+      const exists = await fs.pathExists(p);
+      if (!exists) return null;
+      const buf = await fs.readFile(p);
+      return buf && buf.length ? buf : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private noBorderTable(table: Table) {
+    // docx Table borders are configured at TableCell/Row or global style;
+    // easiest: rely on default and keep content compact.
+    // (We already keep header tables minimal. If you want strict no-border,
+    // we can add style or set borders per cell later.)
+    return table;
   }
 
   // -------------------------
@@ -467,10 +541,17 @@ export class PayrollService {
       };
     });
 
-    const generatedAt = DateTime.now().setZone(TZ);
-    const headerLine = `Period: ${dto.periodFrom} → ${dto.periodTo}    |    GeneratedAt: ${generatedAt.toFormat(
+    // ✅ Use run.generatedAt for "Prepared Date"
+    const generatedAt = run.generatedAt
+      ? DateTime.fromJSDate(run.generatedAt as any, { zone: TZ })
+      : DateTime.now().setZone(TZ);
+
+    const headerLine = `Period: ${dto.periodFrom} → ${dto.periodTo}    |    Generated At: ${generatedAt.toFormat(
       'yyyy-LL-dd HH:mm',
     )} (${TZ})`;
+
+    // Optional logo
+    const logoBuf = await this.tryLoadLogoBuffer();
 
     const doc = new Document({
       sections: [
@@ -482,20 +563,40 @@ export class PayrollService {
             },
           },
           children: [
+            // =========================
+            // Company Header Block
+            // =========================
+            this.buildCompanyHeader(logoBuf),
+
+            // Title
             new Paragraph({
+              alignment: AlignmentType.CENTER,
               children: [
                 new TextRun({
                   text: 'Payroll Export (Details)',
                   bold: true,
-                  size: 28,
+                  size: 30,
                 }),
               ],
             }),
+
+            // Period line
             new Paragraph({
+              alignment: AlignmentType.CENTER,
               children: [new TextRun({ text: headerLine, size: 20 })],
             }),
+
             new Paragraph({ text: '' }),
+
+            // Main table
             this.buildTable(computed),
+
+            new Paragraph({ text: '' }),
+
+            // =========================
+            // Footer / Approval
+            // =========================
+            this.buildFooterApproval(generatedAt),
           ],
         },
       ],
@@ -512,8 +613,109 @@ export class PayrollService {
     return `${baseUrl}/exports/${fileName}`;
   }
 
+  private buildCompanyHeader(logoBuf: Buffer | null) {
+    // Two-column header table (logo | company info)
+    const logoCell = new TableCell({
+      width: { size: 18, type: WidthType.PERCENTAGE },
+      children: [
+        ...(logoBuf
+          ? [
+              new Paragraph({
+                children: [
+                  new ImageRun({
+                    data: logoBuf,
+                    transformation: { width: 140, height: 50 },
+                    // ✅ FIX TS2345: docx ImageRun requires "type"
+                    type: detectImageType(logoBuf),
+                  }),
+                ],
+              }),
+            ]
+          : [
+              new Paragraph({
+                children: [
+                  new TextRun({
+                    text: '',
+                    size: 1,
+                  }),
+                ],
+              }),
+            ]),
+      ],
+    });
+
+    const infoCell = new TableCell({
+      width: { size: 82, type: WidthType.PERCENTAGE },
+      children: [
+        new Paragraph({
+          alignment: AlignmentType.LEFT,
+          children: [new TextRun({ text: COMPANY_NAME, bold: true, size: 28 })],
+        }),
+        new Paragraph({
+          alignment: AlignmentType.LEFT,
+          children: [new TextRun({ text: COMPANY_ADDRESS, size: 20 })],
+        }),
+        new Paragraph({
+          alignment: AlignmentType.LEFT,
+          children: [
+            new TextRun({ text: `Phone: ${COMPANY_PHONE}`, size: 20 }),
+          ],
+        }),
+      ],
+    });
+
+    const t = new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          children: [logoCell, infoCell],
+        }),
+      ],
+    });
+
+    return this.noBorderTable(t);
+  }
+
+  private buildFooterApproval(generatedAt: DateTime) {
+    const preparedText = `Prepared Date: ${generatedAt.toFormat('yyyy-LL-dd')}`;
+    const approvedText = `Approved by: HR Department (Signed)`;
+
+    const leftCell = new TableCell({
+      width: { size: 50, type: WidthType.PERCENTAGE },
+      children: [
+        new Paragraph({
+          alignment: AlignmentType.LEFT,
+          children: [new TextRun({ text: preparedText, size: 20 })],
+        }),
+      ],
+    });
+
+    const rightCell = new TableCell({
+      width: { size: 50, type: WidthType.PERCENTAGE },
+      children: [
+        new Paragraph({
+          alignment: AlignmentType.RIGHT,
+          children: [new TextRun({ text: approvedText, size: 20 })],
+        }),
+      ],
+    });
+
+    const t = new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          children: [leftCell, rightCell],
+        }),
+      ],
+    });
+
+    return this.noBorderTable(t);
+  }
+
   private buildTable(items: Array<{ r: any; ex: any }>) {
+    // ✅ Add "No." column first
     const headers = [
+      'No.',
       'Employee',
       'SSN#',
       'Type',
@@ -531,22 +733,46 @@ export class PayrollService {
       'Total',
     ];
 
+    // Column width plan (percentage)
+    // Make Employee wider, No small, numeric columns compact
+    const colWidthsPct = [
+      4, // No.
+      18, // Employee
+      8, // SSN#
+      6, // Type
+      7, // Rate
+      6, // Hours
+      7, // OT Hours
+      7, // Training
+      6, // Sick
+      7, // Holiday
+      6, // PTO
+      6, // Mileage
+      8, // Regular Pay
+      7, // OT Pay
+      7, // Extras Pay
+      8, // Total
+    ];
+
     const headerRow = new TableRow({
-      children: headers.map(
-        (h) =>
-          new TableCell({
-            children: [
-              new Paragraph({
-                alignment: AlignmentType.LEFT,
-                children: [new TextRun({ text: h, bold: true, size: 18 })],
-              }),
-            ],
-          }),
-      ),
+      tableHeader: true, // ✅ Repeat header on each page
+      children: headers.map((h, idx) => {
+        const w = colWidthsPct[idx] ?? 6;
+        return new TableCell({
+          width: { size: w, type: WidthType.PERCENTAGE },
+          children: [
+            new Paragraph({
+              alignment: AlignmentType.LEFT,
+              children: [new TextRun({ text: h, bold: true, size: 18 })],
+            }),
+          ],
+        });
+      }),
     });
 
-    const bodyRows = items.map(({ r, ex }) => {
+    const bodyRows = items.map(({ r, ex }, i) => {
       const cells = [
+        String(i + 1), // ✅ No.
         safeText(r.staffName),
         safeText(r.employeeSSN),
         safeText(r.staffType),
@@ -565,16 +791,17 @@ export class PayrollService {
       ];
 
       return new TableRow({
-        children: cells.map(
-          (c) =>
-            new TableCell({
-              children: [
-                new Paragraph({
-                  children: [new TextRun({ text: c, size: 18 })],
-                }),
-              ],
-            }),
-        ),
+        children: cells.map((c, idx) => {
+          const w = colWidthsPct[idx] ?? 6;
+          return new TableCell({
+            width: { size: w, type: WidthType.PERCENTAGE },
+            children: [
+              new Paragraph({
+                children: [new TextRun({ text: c, size: 18 })],
+              }),
+            ],
+          });
+        }),
       });
     });
 

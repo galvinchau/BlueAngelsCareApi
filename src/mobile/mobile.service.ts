@@ -1,9 +1,5 @@
 // ======================================================
 //  src/mobile/mobile.service.ts
-//  - Timezone: America/New_York (Altoona, PA)
-//  - Save Daily Note into DailyNote table
-//  - Compute template fields (TotalH/Units/Lost/Over/Under) at submit time
-//  - Google Drive export is gated by env ENABLE_GOOGLE_REPORTS=1
 // ======================================================
 
 import {
@@ -23,15 +19,8 @@ import { DateTime } from 'luxon';
 import { PrismaService } from '../prisma/prisma.service';
 import { GoogleReportsService } from '../reports/google-reports.service';
 
-/**
- * Mobile shift status
- */
 export type ShiftStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED';
 
-/**
- * ✅ Mobile Individual Lite DTO (for Clients screen)
- * NOTE: Schema currently doesn't expose Medicaid field in Individual, so maNumber is null for now.
- */
 export interface MobileIndividualLite {
   id: string;
   fullName: string;
@@ -41,9 +30,6 @@ export interface MobileIndividualLite {
   phone?: string | null;
 }
 
-/**
- * Mobile shift DTO
- */
 export interface MobileShift {
   id: string;
   date: string;
@@ -63,9 +49,6 @@ export interface MobileShift {
   outcomeText?: string | null;
 }
 
-/**
- * Payload from mobile
- */
 export interface MobileDailyNotePayload {
   shiftId: string;
   staffId: string;
@@ -106,15 +89,12 @@ export interface MobileDailyNotePayload {
 
   mileage?: number;
 
-  // NEW (mobile already sends these at runtime)
   isCanceled?: boolean;
   cancelReason?: string;
 
-  // Signatures are included in payload JSON (file reports service reads these)
   dspSignature?: string;
   individualSignature?: string;
 
-  // Optional (if you want to store/compute)
   overReason?: string;
 }
 
@@ -131,19 +111,11 @@ export interface CheckInOutResponse {
 
 const TZ = 'America/New_York';
 
-/**
- * IMPORTANT:
- * Never use JS Date.getHours()/getMinutes() because it depends on server timezone.
- * Always format using Luxon with explicit time zone (America/New_York).
- */
 function formatTimeHHmmInTZ(dt: Date | null | undefined): string | null {
   if (!dt) return null;
   return DateTime.fromJSDate(dt, { zone: 'utc' }).setZone(TZ).toFormat('HH:mm');
 }
 
-/**
- * Parse "HH:mm" into minutes from 00:00.
- */
 function hhmmToMinutes(hhmm?: string | null): number | null {
   if (!hhmm) return null;
   const m = /^(\d{2}):(\d{2})$/.exec(String(hhmm));
@@ -154,9 +126,6 @@ function hhmmToMinutes(hhmm?: string | null): number | null {
   return hh * 60 + mm;
 }
 
-/**
- * Compute duration minutes with overnight support.
- */
 function computeDurationMinutes(
   startHHmm?: string | null,
   endHHmm?: string | null,
@@ -165,28 +134,19 @@ function computeDurationMinutes(
   const e = hhmmToMinutes(endHHmm);
   if (s === null || e === null) return null;
   let diff = e - s;
-  if (diff < 0) diff += 1440; // overnight
+  if (diff < 0) diff += 1440;
   return diff;
 }
 
-/**
- * Convert minutes to hours string (2 decimals).
- */
 function minutesToHoursStr(mins: number): string {
   const hrs = mins / 60;
   return hrs.toFixed(2);
 }
 
-/**
- * Convert minutes to 15-min units (ceil).
- */
 function minutesToUnits(mins: number): number {
   return Math.ceil(mins / 15);
 }
 
-/**
- * Helper: format address (full line used in shifts)
- */
 function formatAddress(ind: Individual): string {
   const parts = [
     ind.address1 ?? '',
@@ -200,9 +160,6 @@ function formatAddress(ind: Individual): string {
   return parts.join(', ');
 }
 
-/**
- * ✅ Helper: for Clients screen (address1 + address2)
- */
 function formatAddressLines(ind: Individual): {
   address1: string | null;
   address2: string | null;
@@ -222,18 +179,12 @@ function formatAddressLines(ind: Individual): {
   };
 }
 
-/**
- * ✅ Helper: normalize query
- */
 function normalizeQ(q: string): string {
   return String(q || '')
     .trim()
     .replace(/\s+/g, ' ');
 }
 
-/**
- * Helper: map ScheduleShift -> MobileShift
- */
 function mapShiftToMobileShift(params: {
   shift: ScheduleShift & {
     individual: Individual;
@@ -241,14 +192,13 @@ function mapShiftToMobileShift(params: {
     visits: Visit[];
   };
   staffId: string;
-  date: string; // YYYY-MM-DD (America/New_York)
+  date: string;
 }): MobileShift {
   const { shift, staffId, date } = params;
   const individual = shift.individual;
   const service = shift.service;
   const visits = shift.visits ?? [];
 
-  // Status
   let status: ShiftStatus = 'NOT_STARTED';
   switch (shift.status) {
     case ScheduleStatus.IN_PROGRESS:
@@ -260,7 +210,6 @@ function mapShiftToMobileShift(params: {
       break;
   }
 
-  // Visits for DSP on the same local day (America/New_York)
   const visitsForDsp = visits.filter((v) => {
     if (v.dspId !== staffId || !v.checkInAt) return false;
     const localDateStr = DateTime.fromJSDate(v.checkInAt)
@@ -284,7 +233,6 @@ function mapShiftToMobileShift(params: {
       return vEnd > maxEnd ? v : max;
     });
 
-    // Format times in America/New_York (stable on any server timezone)
     visitStart = formatTimeHHmmInTZ(earliest.checkInAt);
     visitEnd = formatTimeHHmmInTZ(latest.checkOutAt ?? latest.checkInAt);
 
@@ -292,7 +240,6 @@ function mapShiftToMobileShift(params: {
     else status = 'COMPLETED';
   }
 
-  // Planned start/end format in America/New_York
   const scheduleStart = formatTimeHHmmInTZ(shift.plannedStart) ?? '';
   const scheduleEnd = formatTimeHHmmInTZ(shift.plannedEnd) ?? '';
 
@@ -316,16 +263,13 @@ function mapShiftToMobileShift(params: {
   };
 }
 
-/**
- * ✅ NEW Helper: map ScheduleShift -> MobileShift for Client Detail
- */
 function mapShiftToMobileShiftForClientDetail(params: {
   shift: ScheduleShift & {
     individual: Individual;
     service: Service;
     visits: Visit[];
   };
-  date: string; // YYYY-MM-DD (America/New_York)
+  date: string;
   staffId?: string;
 }): MobileShift {
   const { shift, date, staffId } = params;
@@ -333,7 +277,6 @@ function mapShiftToMobileShiftForClientDetail(params: {
   const service = shift.service;
   const visits = shift.visits ?? [];
 
-  // Base status from shift
   let status: ShiftStatus = 'NOT_STARTED';
   switch (shift.status) {
     case ScheduleStatus.IN_PROGRESS:
@@ -413,9 +356,19 @@ type StartUnknownVisitInput = {
   medicaidId?: string | null;
   clientId?: string | null;
 
-  serviceCode?: string; // default COMP
-  clientTime?: string; // ISO from phone optional
+  serviceCode?: string;
+  clientTime?: string;
 };
+
+function isOfficeRole(role?: string | null) {
+  const r = (role || '').trim().toLowerCase();
+  return (
+    r === 'office staff' ||
+    r === 'office' ||
+    r === 'officestaff' ||
+    r === 'office_staff'
+  );
+}
 
 @Injectable()
 export class MobileService {
@@ -425,7 +378,7 @@ export class MobileService {
   ) {}
 
   /**
-   * ✅ Resolve staffId from either:
+   * Resolve Employee.id from either:
    * - Employee.id (cuid)
    * - Employee.employeeId (human code like "BAC-E-2025-008")
    */
@@ -444,24 +397,44 @@ export class MobileService {
   }
 
   /**
-   * Compute Sunday 00:00 as weekStart (BAC Scheduler convention: Sun -> Sat)
+   * ✅ Double-time guard:
+   * If this staff is Office role AND has open OfficeAttendanceEvent (IN),
+   * block visit check-in until office check-out happens.
    */
+  private async ensureNotCheckedInOfficeTimeKeeping(staffTechId: string) {
+    const emp = await this.prisma.employee.findUnique({
+      where: { id: staffTechId },
+      select: { employeeId: true, role: true },
+    });
+
+    if (!emp) return;
+    if (!isOfficeRole(emp.role)) return;
+
+    // OfficeAttendanceEvent.staffId uses Employee.employeeId (human code)
+    const open = await this.prisma.officeAttendanceEvent.findFirst({
+      where: { staffId: emp.employeeId, checkOutAt: null },
+      orderBy: { checkInAt: 'desc' },
+      select: { id: true, checkInAt: true },
+    });
+
+    if (open) {
+      throw new BadRequestException(
+        'You are currently checked-in for Office Time Keeping. Please check out first.',
+      );
+    }
+  }
+
   private getWeekWindow(nowTz: DateTime): {
     weekStart: DateTime;
     weekEnd: DateTime;
   } {
     const dayStart = nowTz.startOf('day');
-    // Luxon weekday: 1=Mon ... 7=Sun => subtract weekday%7 to get Sunday
     const daysToSubtract = dayStart.weekday % 7;
     const weekStart = dayStart.minus({ days: daysToSubtract });
     const weekEnd = weekStart.plus({ days: 7 }).minus({ milliseconds: 1 });
     return { weekStart, weekEnd };
   }
 
-  /**
-   * Ensure ScheduleWeek exists (required by ScheduleShift.weekId)
-   * NOTE: no unique constraint on (individualId, weekStart) so we do findFirst then create.
-   */
   private async getOrCreateScheduleWeekIdTx(
     tx: any,
     individualId: string,
@@ -485,10 +458,8 @@ export class MobileService {
     const created = await tx.scheduleWeek.create({
       data: {
         individualId,
-        // templateId is optional
         weekStart: weekStartJs,
         weekEnd: weekEndJs,
-        // generatedFromTemplate default true in schema
         notes: 'AUTO_CREATED_BY_UNKNOWN_VISIT',
       },
       select: { id: true },
@@ -498,12 +469,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // ✅ Start Unknown Visit (AD-HOC)
-  // - Create ScheduleWeek (if missing) for this week
-  // - Create ScheduleShift for today (plannedStart=now, plannedEnd=now+60m)
-  // - Create Visit check-in immediately
-  // - Mark shift notes as ADHOC
-  // - NEVER return "blind 500": map to 400/404 with messages
+  // Start Unknown Visit (AD-HOC)
   // =====================================================
   async startUnknownVisit(
     input: StartUnknownVisitInput,
@@ -512,20 +478,19 @@ export class MobileService {
     const firstName = String(input.firstName || '').trim();
     const lastName = String(input.lastName || '').trim();
 
-    if (!staffIdRaw) {
-      throw new BadRequestException('Missing staffId');
-    }
+    if (!staffIdRaw) throw new BadRequestException('Missing staffId');
     if (!firstName || !lastName) {
       throw new BadRequestException('Please enter First Name and Last Name');
     }
 
-    // Resolve employee.id (supports both cuid and employeeId code)
-    const staffId = await this.resolveEmployeeId(staffIdRaw);
-    if (!staffId) {
+    const staffTechId = await this.resolveEmployeeId(staffIdRaw);
+    if (!staffTechId) {
       throw new BadRequestException(`Employee not found: ${staffIdRaw}`);
     }
 
-    // 1) Find individual by name (best effort)
+    // ✅ Double-time block
+    await this.ensureNotCheckedInOfficeTimeKeeping(staffTechId);
+
     const individual = await this.findIndividualByName(firstName, lastName);
     if (!individual) {
       throw new NotFoundException(
@@ -533,7 +498,6 @@ export class MobileService {
       );
     }
 
-    // 2) Choose service (default COMP)
     const serviceCode = String(input.serviceCode || 'COMP')
       .trim()
       .toUpperCase();
@@ -542,12 +506,9 @@ export class MobileService {
       where: { serviceCode },
       select: { id: true, serviceCode: true, serviceName: true },
     });
-
-    if (!service) {
+    if (!service)
       throw new BadRequestException(`Service not found: ${serviceCode}`);
-    }
 
-    // 3) Determine times (in TZ)
     const now = input.clientTime
       ? DateTime.fromISO(input.clientTime, { setZone: true }).setZone(TZ)
       : DateTime.now().setZone(TZ);
@@ -557,7 +518,6 @@ export class MobileService {
     const scheduleDate = now.startOf('day').toJSDate();
 
     try {
-      // 4) Create week (if missing) + shift + visit in transaction
       const created = await this.prisma.$transaction(async (tx) => {
         const weekId = await this.getOrCreateScheduleWeekIdTx(
           tx,
@@ -575,8 +535,8 @@ export class MobileService {
             plannedStart,
             plannedEnd,
 
-            plannedDspId: staffId,
-            actualDspId: staffId,
+            plannedDspId: staffTechId,
+            actualDspId: staffTechId,
 
             status: ScheduleStatus.IN_PROGRESS,
 
@@ -591,12 +551,12 @@ export class MobileService {
           data: {
             scheduleShiftId: shift.id,
             individualId: individual.id,
-            dspId: staffId,
+            dspId: staffTechId,
             serviceId: service.id,
             checkInAt: plannedStart,
             source: VisitSource.MOBILE,
           } as any,
-          select: highlightSelectId(),
+          select: { id: true },
         });
 
         return { shiftId: shift.id };
@@ -604,17 +564,15 @@ export class MobileService {
 
       return { shiftId: created.shiftId };
     } catch (err: any) {
-      // Never leak raw 500 to mobile; give friendly 400
       console.error('[MobileService] startUnknownVisit failed', {
         staffIdRaw,
-        staffIdResolved: staffId,
+        staffTechId,
         firstName,
         lastName,
         serviceCode,
         err: err?.message ?? err,
       });
 
-      // Prisma validation/constraint errors often include keywords like "Invalid" / "missing" / "constraint"
       const msg = String(err?.message || '');
       if (msg.toLowerCase().includes('prisma')) {
         throw new BadRequestException(
@@ -626,12 +584,6 @@ export class MobileService {
     }
   }
 
-  /**
-   * ✅ Helper: find individual by name
-   * Priority:
-   * 1) exact match (case-insensitive)
-   * 2) contains match
-   */
   private async findIndividualByName(
     firstName: string,
     lastName: string,
@@ -662,9 +614,6 @@ export class MobileService {
     return (contains as unknown as Individual) ?? null;
   }
 
-  // =====================================================
-  // ✅ Search Individuals for mobile Clients screen
-  // =====================================================
   async searchIndividuals(search: string): Promise<MobileIndividualLite[]> {
     const q = normalizeQ(search);
     if (!q) return [];
@@ -721,7 +670,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // Today shifts for mobile
+  // Today shifts for mobile (✅ normalize staffId)
   // =====================================================
   async getTodayShifts(
     staffId: string,
@@ -734,17 +683,19 @@ export class MobileService {
       .endOf('day')
       .toJSDate();
 
+    const staffTechId = (await this.resolveEmployeeId(staffId)) ?? staffId;
+
     const shifts = await this.prisma.scheduleShift.findMany({
       where: {
         scheduleDate: { gte: dayStartLocal, lte: dayEndLocal },
-        OR: [{ plannedDspId: staffId }, { actualDspId: staffId }],
+        OR: [{ plannedDspId: staffTechId }, { actualDspId: staffTechId }],
       },
       include: {
         individual: true,
         service: true,
         visits: {
           where: {
-            dspId: staffId,
+            dspId: staffTechId,
             checkInAt: { gte: dayStartLocal, lte: dayEndLocal },
           },
           orderBy: { checkInAt: 'asc' },
@@ -755,14 +706,11 @@ export class MobileService {
 
     return {
       shifts: shifts.map((s) =>
-        mapShiftToMobileShift({ shift: s, staffId, date }),
+        mapShiftToMobileShift({ shift: s, staffId: staffTechId, date }),
       ),
     };
   }
 
-  // =====================================================
-  // Today shifts for a specific Individual (Client detail)
-  // =====================================================
   async getTodayShiftsForIndividual(
     individualId: string,
     date: string,
@@ -775,6 +723,10 @@ export class MobileService {
       .endOf('day')
       .toJSDate();
 
+    const staffTechId = staffId
+      ? ((await this.resolveEmployeeId(staffId)) ?? staffId)
+      : undefined;
+
     const shifts = await this.prisma.scheduleShift.findMany({
       where: {
         scheduleDate: { gte: dayStartLocal, lte: dayEndLocal },
@@ -786,7 +738,7 @@ export class MobileService {
         visits: {
           where: {
             checkInAt: { gte: dayStartLocal, lte: dayEndLocal },
-            ...(staffId ? { dspId: staffId } : {}),
+            ...(staffTechId ? { dspId: staffTechId } : {}),
           },
           orderBy: { checkInAt: 'asc' },
         },
@@ -796,13 +748,17 @@ export class MobileService {
 
     return {
       shifts: shifts.map((s) =>
-        mapShiftToMobileShiftForClientDetail({ shift: s, date, staffId }),
+        mapShiftToMobileShiftForClientDetail({
+          shift: s,
+          date,
+          staffId: staffTechId,
+        }),
       ),
     };
   }
 
   // =====================================================
-  // Save Daily Note from mobile
+  // Save Daily Note from mobile (✅ normalize staffId)
   // =====================================================
   async submitDailyNote(payload: MobileDailyNotePayload) {
     const {
@@ -819,12 +775,14 @@ export class MobileService {
       mileage,
     } = payload;
 
+    const staffTechId = (await this.resolveEmployeeId(staffId)) ?? staffId;
+
     const serviceDate = DateTime.fromISO(date, { zone: TZ })
       .startOf('day')
       .toJSDate();
 
     const visit = await this.prisma.visit.findFirst({
-      where: { scheduleShiftId: shiftId, dspId: staffId },
+      where: { scheduleShiftId: shiftId, dspId: staffTechId },
       orderBy: { checkInAt: 'asc' },
     });
 
@@ -875,7 +833,7 @@ export class MobileService {
       data: {
         shiftId,
         individualId,
-        staffId,
+        staffId: staffTechId,
         serviceId: service?.id ?? null,
         visitId: visit?.id ?? null,
         date: serviceDate,
@@ -930,13 +888,18 @@ export class MobileService {
   }
 
   // =====================================================
-  // Check-in
+  // Check-in (✅ double-time guard + normalize staffId)
   // =====================================================
   async checkInShift(
     shiftId: string,
     staffId: string,
     clientTime?: string,
   ): Promise<CheckInOutResponse> {
+    const staffTechId = (await this.resolveEmployeeId(staffId)) ?? staffId;
+
+    // ✅ Double-time block
+    await this.ensureNotCheckedInOfficeTimeKeeping(staffTechId);
+
     const checkInAt = clientTime
       ? DateTime.fromISO(clientTime, { setZone: true }).setZone(TZ).toJSDate()
       : DateTime.now().setZone(TZ).toJSDate();
@@ -955,7 +918,7 @@ export class MobileService {
       data: {
         scheduleShiftId: shiftId,
         individualId: shift?.individualId ?? '',
-        dspId: staffId,
+        dspId: staffTechId,
         serviceId: shift?.serviceId ?? null,
         checkInAt,
         source: VisitSource.MOBILE,
@@ -967,7 +930,7 @@ export class MobileService {
         where: { id: shiftId },
         data: {
           status: ScheduleStatus.IN_PROGRESS,
-          actualDspId: shift.actualDspId ?? staffId,
+          actualDspId: shift.actualDspId ?? staffTechId,
         },
       });
     }
@@ -976,20 +939,22 @@ export class MobileService {
       status: 'OK',
       mode: 'IN',
       shiftId,
-      staffId,
+      staffId: staffTechId,
       time: checkInAt.toISOString(),
       timesheetId: visit.id,
     };
   }
 
   // =====================================================
-  // Check-out
+  // Check-out (✅ normalize staffId)
   // =====================================================
   async checkOutShift(
     shiftId: string,
     staffId: string,
     clientTime?: string,
   ): Promise<CheckInOutResponse> {
+    const staffTechId = (await this.resolveEmployeeId(staffId)) ?? staffId;
+
     const checkOutAt = clientTime
       ? DateTime.fromISO(clientTime, { setZone: true }).setZone(TZ).toJSDate()
       : DateTime.now().setZone(TZ).toJSDate();
@@ -1005,7 +970,7 @@ export class MobileService {
     });
 
     let visit = await this.prisma.visit.findFirst({
-      where: { scheduleShiftId: shiftId, dspId: staffId, checkOutAt: null },
+      where: { scheduleShiftId: shiftId, dspId: staffTechId, checkOutAt: null },
       orderBy: { checkInAt: 'desc' },
     });
 
@@ -1019,7 +984,7 @@ export class MobileService {
         data: {
           scheduleShiftId: shiftId,
           individualId: shift?.individualId ?? '',
-          dspId: staffId,
+          dspId: staffTechId,
           serviceId: shift?.serviceId ?? null,
           checkInAt: checkOutAt,
           checkOutAt,
@@ -1032,7 +997,7 @@ export class MobileService {
       where: { id: shiftId },
       data: {
         status: ScheduleStatus.COMPLETED,
-        actualDspId: shift?.actualDspId ?? staffId,
+        actualDspId: shift?.actualDspId ?? staffTechId,
       },
     });
 
@@ -1040,16 +1005,9 @@ export class MobileService {
       status: 'OK',
       mode: 'OUT',
       shiftId,
-      staffId,
+      staffId: staffTechId,
       time: checkOutAt.toISOString(),
       timesheetId: visit.id,
     };
   }
-}
-
-/**
- * Tiny helper to keep select consistent without type noise.
- */
-function highlightSelectId() {
-  return { id: true } as const;
 }
