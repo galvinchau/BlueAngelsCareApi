@@ -6,7 +6,6 @@ import * as fs from 'fs-extra';
 import * as path from 'path';
 import {
   AlignmentType,
-  BorderStyle,
   Document,
   ImageRun,
   Packer,
@@ -15,6 +14,7 @@ import {
   TableCell,
   TableRow,
   TextRun,
+  VerticalAlign,
   WidthType,
 } from 'docx';
 
@@ -27,9 +27,9 @@ const TZ = 'America/New_York';
 // Company header (customize via ENV)
 // =========================
 const COMPANY_NAME =
-  process.env.PAYROLL_COMPANY_NAME || 'Blue Angels Care, LLC';
+  process.env.PAYROLL_COMPANY_NAME || 'Blue Angels Care , LLC';
 const COMPANY_ADDRESS =
-  process.env.PAYROLL_COMPANY_ADDRESS || '202 Campbell Ave, Altoona, PA 16602';
+  process.env.PAYROLL_COMPANY_ADDRESS || '3107 Beale Avenue, Altoona, PA 16601';
 const COMPANY_PHONE = process.env.PAYROLL_COMPANY_PHONE || '(814) 600-2313';
 
 // Optional: absolute or relative path to a logo file (png/jpg)
@@ -37,6 +37,9 @@ const COMPANY_PHONE = process.env.PAYROLL_COMPANY_PHONE || '(814) 600-2313';
 const COMPANY_LOGO_PATH = (process.env.PAYROLL_COMPANY_LOGO_PATH || '')
   .toString()
   .trim();
+
+// Dark blue (company name)
+const COMPANY_NAME_COLOR = '1F4E79';
 
 function clampNonNeg(n: any) {
   const x = Number(n);
@@ -65,7 +68,15 @@ function inferStaffType(role?: string | null): 'DSP' | 'OFFICE' {
   return 'OFFICE';
 }
 
-// ✅ NEW: detect png/jpg from buffer (docx ImageRun requires "type")
+// ✅ HH:mm formatter from minutes (prevents ".08" confusion)
+function fmtHHmm(totalMinutes: number) {
+  const m = Math.max(0, Math.round(Number(totalMinutes) || 0));
+  const hh = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
+// ✅ detect png/jpg from buffer (docx ImageRun requires "type")
 function detectImageType(buf: Buffer): 'png' | 'jpg' {
   // PNG magic: 89 50 4E 47 0D 0A 1A 0A
   if (
@@ -90,6 +101,36 @@ function detectImageType(buf: Buffer): 'png' | 'jpg' {
 
   // default safe
   return 'png';
+}
+
+type Interval = { startMs: number; endMs: number };
+
+function mergeIntervals(intervals: Interval[]): Interval[] {
+  if (!intervals.length) return [];
+  const sorted = [...intervals].sort((a, b) => a.startMs - b.startMs);
+
+  const out: Interval[] = [];
+  let cur = { ...sorted[0] };
+
+  for (let i = 1; i < sorted.length; i++) {
+    const n = sorted[i];
+    if (n.startMs <= cur.endMs) {
+      cur.endMs = Math.max(cur.endMs, n.endMs);
+    } else {
+      out.push(cur);
+      cur = { ...n };
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function sumIntervalsMinutes(intervals: Interval[]): number {
+  let totalMs = 0;
+  for (const it of intervals) {
+    totalMs += Math.max(0, it.endMs - it.startMs);
+  }
+  return Math.max(0, Math.round(totalMs / 60000));
 }
 
 @Injectable()
@@ -136,10 +177,6 @@ export class PayrollService {
   }
 
   private noBorderTable(table: Table) {
-    // docx Table borders are configured at TableCell/Row or global style;
-    // easiest: rely on default and keep content compact.
-    // (We already keep header tables minimal. If you want strict no-border,
-    // we can add style or set borders per cell later.)
     return table;
   }
 
@@ -167,7 +204,6 @@ export class PayrollService {
       },
     });
 
-    // These rows exist now (SQL created). Prisma client will work after prisma generate.
     const rates = await this.prisma.payrollRate.findMany({
       select: {
         employeeId: true,
@@ -257,23 +293,144 @@ export class PayrollService {
   }
 
   // -------------------------
-  // POST /payroll/generate
+  // compute payroll period as [from, toExclusive)
   // -------------------------
-  async generate(from: string, to: string) {
+  private computePeriod(from: string, to: string) {
     const fromDt = DateTime.fromISO(from, { zone: TZ }).startOf('day');
-    const toDt = DateTime.fromISO(to, { zone: TZ }).endOf('day');
-
+    const toDt = DateTime.fromISO(to, { zone: TZ }).startOf('day');
     if (!fromDt.isValid || !toDt.isValid) {
       throw new BadRequestException('Invalid period');
     }
-    if (toDt < fromDt) {
+    const toExclusive = toDt.plus({ days: 1 });
+    if (toExclusive <= fromDt) {
       throw new BadRequestException('Invalid period: to < from');
     }
+    return { fromDt, toExclusive };
+  }
+
+  // -------------------------
+  // VISIT minutes (dedup + merge overlap)
+  // -------------------------
+  private async getVisitMinutesByEmployeeTechId(
+    fromDt: DateTime,
+    toExclusive: DateTime,
+  ) {
+    const visits = await this.prisma.visit.findMany({
+      where: {
+        checkInAt: { gte: fromDt.toJSDate(), lt: toExclusive.toJSDate() },
+        checkOutAt: { not: null },
+      },
+      select: {
+        id: true,
+        dspId: true,
+        individualId: true,
+        checkInAt: true,
+        checkOutAt: true,
+        durationMinutes: true,
+      },
+    });
+
+    const rawByDsp = new Map<
+      string,
+      Array<{
+        visitId: string;
+        individualId: string | null;
+        startMs: number;
+        endMs: number;
+        minutes: number;
+      }>
+    >();
+
+    for (const v of visits) {
+      if (!v.checkOutAt) continue;
+
+      const start = DateTime.fromJSDate(v.checkInAt as any, { zone: TZ });
+      const end = DateTime.fromJSDate(v.checkOutAt as any, { zone: TZ });
+
+      if (!start.isValid || !end.isValid) continue;
+      const startMs = start.toMillis();
+      const endMs = end.toMillis();
+      if (endMs <= startMs) continue;
+
+      const minutes =
+        typeof v.durationMinutes === 'number' &&
+        Number.isFinite(v.durationMinutes)
+          ? Math.max(0, Math.round(v.durationMinutes))
+          : Math.max(0, Math.round((endMs - startMs) / 60000));
+
+      if (minutes <= 0) continue;
+
+      const arr = rawByDsp.get(v.dspId) || [];
+      arr.push({
+        visitId: v.id,
+        individualId: v.individualId ?? null,
+        startMs,
+        endMs,
+        minutes,
+      });
+      rawByDsp.set(v.dspId, arr);
+    }
+
+    const minutesByDsp = new Map<string, number>();
+    const debugVisitsByDsp = new Map<
+      string,
+      Array<{
+        visitId: string;
+        checkInAt: string;
+        checkOutAt: string;
+        minutes: number;
+        individualId: string | null;
+      }>
+    >();
+
+    for (const [dspId, arr] of rawByDsp.entries()) {
+      const seen = new Set<string>();
+      const dedup: Interval[] = [];
+      const dbg: Array<{
+        visitId: string;
+        checkInAt: string;
+        checkOutAt: string;
+        minutes: number;
+        individualId: string | null;
+      }> = [];
+
+      for (const it of arr) {
+        const key = `${dspId}|${it.individualId || ''}|${it.startMs}|${it.endMs}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        dedup.push({ startMs: it.startMs, endMs: it.endMs });
+
+        dbg.push({
+          visitId: it.visitId,
+          checkInAt:
+            DateTime.fromMillis(it.startMs, { zone: TZ }).toISO() || '',
+          checkOutAt: DateTime.fromMillis(it.endMs, { zone: TZ }).toISO() || '',
+          minutes: it.minutes,
+          individualId: it.individualId,
+        });
+      }
+
+      const merged = mergeIntervals(dedup);
+      const totalMinutes = sumIntervalsMinutes(merged);
+
+      minutesByDsp.set(dspId, totalMinutes);
+      debugVisitsByDsp.set(dspId, dbg);
+    }
+
+    return { minutesByDsp, debugVisitsByDsp };
+  }
+
+  // -------------------------
+  // POST /payroll/generate
+  // -------------------------
+  async generate(from: string, to: string) {
+    const { fromDt, toExclusive } = this.computePeriod(from, to);
 
     const employees = await this.prisma.employee.findMany({
       orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
       select: {
-        id: true, // technical id (Visit.dspId)
+        id: true,
         employeeId: true,
         firstName: true,
         lastName: true,
@@ -293,61 +450,19 @@ export class PayrollService {
     });
     const rateMap = new Map(rates.map((r) => [r.employeeId, r]));
 
-    // DSP visits
-    const dspVisits = await this.prisma.visit.findMany({
-      where: {
-        checkInAt: { gte: fromDt.toJSDate(), lte: toDt.toJSDate() },
-        checkOutAt: { not: null },
-      },
-      select: {
-        dspId: true,
-        durationMinutes: true,
-        checkInAt: true,
-        checkOutAt: true,
-      },
-    });
+    const { minutesByDsp, debugVisitsByDsp } =
+      await this.getVisitMinutesByEmployeeTechId(fromDt, toExclusive);
 
-    const dspMinutesByEmpId = new Map<string, number>();
-    for (const v of dspVisits) {
-      const minutes =
-        typeof v.durationMinutes === 'number' &&
-        Number.isFinite(v.durationMinutes)
-          ? v.durationMinutes
-          : Math.max(
-              0,
-              Math.round(
-                (DateTime.fromJSDate(v.checkOutAt as Date, {
-                  zone: TZ,
-                }).toMillis() -
-                  DateTime.fromJSDate(v.checkInAt as Date, {
-                    zone: TZ,
-                  }).toMillis()) /
-                  60000,
-              ),
-            );
-
-      dspMinutesByEmpId.set(
-        v.dspId,
-        (dspMinutesByEmpId.get(v.dspId) || 0) + minutes,
-      );
-    }
-
-    // Office weekly approval:
-    // We match by weekStart/weekEnd exact boundaries based on input dates.
     const officeApprovals = await this.prisma.officeWeeklyApproval.findMany({
       where: {
         weekStart: {
           gte: fromDt.toJSDate(),
-          lte: fromDt.plus({ hours: 6 }).toJSDate(),
-        },
-        weekEnd: {
-          gte: toDt.minus({ hours: 6 }).toJSDate(),
-          lte: toDt.toJSDate(),
+          lt: toExclusive.toJSDate(),
         },
         status: 'APPROVED',
       },
       select: {
-        staffId: true, // employeeId
+        staffId: true,
         computedMinutes: true,
         finalMinutes: true,
       },
@@ -356,10 +471,10 @@ export class PayrollService {
     const officeMinutesByStaffId = new Map<string, number>();
     for (const a of officeApprovals) {
       const mins =
-        typeof a.finalMinutes === 'number' && a.finalMinutes > 0
+        typeof a.finalMinutes === 'number' && a.finalMinutes >= 0
           ? a.finalMinutes
           : a.computedMinutes || 0;
-      officeMinutesByStaffId.set(a.staffId, mins);
+      officeMinutesByStaffId.set(a.staffId, Math.max(0, Math.round(mins)));
     }
 
     const rows = employees.map((e) => {
@@ -380,20 +495,47 @@ export class PayrollService {
           ? rr.mileageRate
           : 0.3;
 
+      const officeFinalMinutes = officeMinutesByStaffId.get(staffId) || 0;
+      const visitMinutes = minutesByDsp.get(e.id) || 0;
+
       let minutes = 0;
-      if (staffType === 'DSP') {
-        minutes = dspMinutesByEmpId.get(e.id) || 0;
-      } else {
-        minutes = officeMinutesByStaffId.get(staffId) || 0;
-      }
+      if (staffType === 'DSP') minutes = visitMinutes;
+      else minutes = officeFinalMinutes + visitMinutes;
+
+      const otMinutes = Math.max(0, minutes - 40 * 60);
+      const regularMinutes = minutes - otMinutes;
 
       const hours = minutes / 60;
-      const regularHours = Math.min(40, hours);
-      const otHours = Math.max(0, hours - 40);
+      const regularHours = regularMinutes / 60;
+      const otHours = otMinutes / 60;
 
       const regularPay = regularHours * rate;
       const otPay = otHours * rate * 1.5;
       const totalPay = regularPay + otPay;
+
+      if (staffId === 'BAC-E-2025-008') {
+        const dbg = {
+          periodFrom: fromDt.toISO(),
+          periodToExclusive: toExclusive.toISO(),
+          employeeId: staffId,
+          employeeTechId: e.id,
+          officeFinalMinutes,
+          visitMinutes,
+          visitCount: (debugVisitsByDsp.get(e.id) || []).length,
+          visitHHmm: fmtHHmm(visitMinutes),
+          officeHHmm: fmtHHmm(officeFinalMinutes),
+          totalHHmm: fmtHHmm(officeFinalMinutes + visitMinutes),
+          visitHours: Number((visitMinutes / 60).toFixed(2)),
+          officeHours: Number((officeFinalMinutes / 60).toFixed(2)),
+          totalHours: Number(
+            ((officeFinalMinutes + visitMinutes) / 60).toFixed(2),
+          ),
+        };
+        // eslint-disable-next-line no-console
+        console.log('[PAYROLL DEBUG]', dbg);
+        // eslint-disable-next-line no-console
+        console.log('[PAYROLL DEBUG VISITS]', debugVisitsByDsp.get(e.id) || []);
+      }
 
       return {
         staffId,
@@ -410,6 +552,17 @@ export class PayrollService {
         regularPay: Number(regularPay.toFixed(2)),
         otPay: Number(otPay.toFixed(2)),
         totalPay: Number(totalPay.toFixed(2)),
+
+        officeFinalMinutes,
+        visitMinutes,
+        totalMinutes: minutes,
+        regularMinutes,
+        otMinutes,
+        officeHHmm: fmtHHmm(officeFinalMinutes),
+        visitHHmm: fmtHHmm(visitMinutes),
+        hoursHHmm: fmtHHmm(minutes),
+        regularHHmm: fmtHHmm(regularMinutes),
+        otHHmm: fmtHHmm(otMinutes),
       };
     });
 
@@ -423,8 +576,9 @@ export class PayrollService {
       { totalHours: 0, totalOtHours: 0, totalPay: 0 },
     );
 
-    // Create run
-    const runId = `run_${from}_${to}_${DateTime.now().toMillis()}`;
+    const runId = `run_${fromDt.toFormat('yyyyLLdd')}_${toExclusive
+      .minus({ days: 1 })
+      .toFormat('yyyyLLdd')}_${DateTime.now().toMillis()}`;
 
     await this.prisma.payrollRun.create({
       data: {
@@ -527,8 +681,15 @@ export class PayrollService {
         trainingPay + sickPay + holidayPay + ptoPay + mileagePay;
       const totalWithExtras = clampNonNeg(r.totalPay) + extrasPay;
 
+      const totalMinutes = Math.max(0, Math.round((Number(r.hours) || 0) * 60));
+      const otMinutes = Math.max(0, Math.round((Number(r.otHours) || 0) * 60));
+
       return {
-        r,
+        r: {
+          ...r,
+          hoursHHmm: fmtHHmm(totalMinutes),
+          otHHmm: fmtHHmm(otMinutes),
+        },
         ex: {
           trainingHours,
           sickHours,
@@ -541,7 +702,6 @@ export class PayrollService {
       };
     });
 
-    // ✅ Use run.generatedAt for "Prepared Date"
     const generatedAt = run.generatedAt
       ? DateTime.fromJSDate(run.generatedAt as any, { zone: TZ })
       : DateTime.now().setZone(TZ);
@@ -550,7 +710,6 @@ export class PayrollService {
       'yyyy-LL-dd HH:mm',
     )} (${TZ})`;
 
-    // Optional logo
     const logoBuf = await this.tryLoadLogoBuffer();
 
     const doc = new Document({
@@ -563,12 +722,8 @@ export class PayrollService {
             },
           },
           children: [
-            // =========================
-            // Company Header Block
-            // =========================
             this.buildCompanyHeader(logoBuf),
 
-            // Title
             new Paragraph({
               alignment: AlignmentType.CENTER,
               children: [
@@ -580,7 +735,6 @@ export class PayrollService {
               ],
             }),
 
-            // Period line
             new Paragraph({
               alignment: AlignmentType.CENTER,
               children: [new TextRun({ text: headerLine, size: 20 })],
@@ -588,14 +742,10 @@ export class PayrollService {
 
             new Paragraph({ text: '' }),
 
-            // Main table
             this.buildTable(computed),
 
             new Paragraph({ text: '' }),
 
-            // =========================
-            // Footer / Approval
-            // =========================
             this.buildFooterApproval(generatedAt),
           ],
         },
@@ -614,18 +764,18 @@ export class PayrollService {
   }
 
   private buildCompanyHeader(logoBuf: Buffer | null) {
-    // Two-column header table (logo | company info)
     const logoCell = new TableCell({
+      verticalAlign: VerticalAlign.CENTER,
       width: { size: 18, type: WidthType.PERCENTAGE },
       children: [
         ...(logoBuf
           ? [
               new Paragraph({
+                alignment: AlignmentType.CENTER,
                 children: [
                   new ImageRun({
                     data: logoBuf,
-                    transformation: { width: 140, height: 50 },
-                    // ✅ FIX TS2345: docx ImageRun requires "type"
+                    transformation: { width: 160, height: 55 },
                     type: detectImageType(logoBuf),
                   }),
                 ],
@@ -633,23 +783,26 @@ export class PayrollService {
             ]
           : [
               new Paragraph({
-                children: [
-                  new TextRun({
-                    text: '',
-                    size: 1,
-                  }),
-                ],
+                children: [new TextRun({ text: '', size: 1 })],
               }),
             ]),
       ],
     });
 
     const infoCell = new TableCell({
+      verticalAlign: VerticalAlign.CENTER,
       width: { size: 82, type: WidthType.PERCENTAGE },
       children: [
         new Paragraph({
           alignment: AlignmentType.LEFT,
-          children: [new TextRun({ text: COMPANY_NAME, bold: true, size: 28 })],
+          children: [
+            new TextRun({
+              text: COMPANY_NAME,
+              bold: true,
+              size: 28,
+              color: COMPANY_NAME_COLOR,
+            }),
+          ],
         }),
         new Paragraph({
           alignment: AlignmentType.LEFT,
@@ -681,6 +834,7 @@ export class PayrollService {
     const approvedText = `Approved by: HR Department (Signed)`;
 
     const leftCell = new TableCell({
+      verticalAlign: VerticalAlign.CENTER,
       width: { size: 50, type: WidthType.PERCENTAGE },
       children: [
         new Paragraph({
@@ -691,6 +845,7 @@ export class PayrollService {
     });
 
     const rightCell = new TableCell({
+      verticalAlign: VerticalAlign.CENTER,
       width: { size: 50, type: WidthType.PERCENTAGE },
       children: [
         new Paragraph({
@@ -713,56 +868,56 @@ export class PayrollService {
   }
 
   private buildTable(items: Array<{ r: any; ex: any }>) {
-    // ✅ Add "No." column first
     const headers = [
       'No.',
       'Employee',
       'SSN#',
       'Type',
       'Rate',
-      'Hours',
-      'OT Hours',
-      'Training hour',
+      'Hours\n(HH:mm)',
+      'OT\n(HH:mm)',
+      'Training\nhour',
       'Sick hour',
-      'Holiday hour',
+      'Holiday\nhour',
       'PTO hour',
       'Mileage',
       'Regular Pay',
-      'OT Pay',
-      'Extras Pay',
+      'OT\nPay',
+      'Extras',
       'Total',
     ];
 
-    // Column width plan (percentage)
-    // Make Employee wider, No small, numeric columns compact
+    // ✅ Thu nhỏ Employee lại; nới nhẹ cho các cột tiền
     const colWidthsPct = [
       4, // No.
-      18, // Employee
+      15, // Employee (smaller)
       8, // SSN#
       6, // Type
       7, // Rate
-      6, // Hours
-      7, // OT Hours
+      7, // Hours
+      7, // OT
       7, // Training
       6, // Sick
       7, // Holiday
       6, // PTO
       6, // Mileage
-      8, // Regular Pay
-      7, // OT Pay
-      7, // Extras Pay
-      8, // Total
+      9, // Regular Pay (wider)
+      8, // OT Pay (wider)
+      7, // Extras
+      8, // Total (wider)
     ];
 
+    // ✅ header: canh giữa cả dòng & cột
     const headerRow = new TableRow({
-      tableHeader: true, // ✅ Repeat header on each page
+      tableHeader: true,
       children: headers.map((h, idx) => {
         const w = colWidthsPct[idx] ?? 6;
         return new TableCell({
+          verticalAlign: VerticalAlign.CENTER,
           width: { size: w, type: WidthType.PERCENTAGE },
           children: [
             new Paragraph({
-              alignment: AlignmentType.LEFT,
+              alignment: AlignmentType.CENTER,
               children: [new TextRun({ text: h, bold: true, size: 18 })],
             }),
           ],
@@ -770,15 +925,28 @@ export class PayrollService {
       }),
     });
 
+    // Helper align rule:
+    // - No, SSN#, Type => CENTER
+    // - All other columns => RIGHT
+    const isCenterCol = (colIndex: number) =>
+      colIndex === 0 || colIndex === 2 || colIndex === 3;
+
     const bodyRows = items.map(({ r, ex }, i) => {
+      const hoursHM =
+        (r.hoursHHmm ?? '').toString().trim() ||
+        fmtHHmm(Math.round((Number(r.hours) || 0) * 60));
+      const otHM =
+        (r.otHHmm ?? '').toString().trim() ||
+        fmtHHmm(Math.round((Number(r.otHours) || 0) * 60));
+
       const cells = [
-        String(i + 1), // ✅ No.
+        String(i + 1), // No.
         safeText(r.staffName),
         safeText(r.employeeSSN),
         safeText(r.staffType),
         money(r.rate),
-        num2(r.hours),
-        num2(r.otHours),
+        safeText(hoursHM),
+        safeText(otHM),
         num2(ex.trainingHours),
         num2(ex.sickHours),
         num2(ex.holidayHours),
@@ -793,10 +961,16 @@ export class PayrollService {
       return new TableRow({
         children: cells.map((c, idx) => {
           const w = colWidthsPct[idx] ?? 6;
+          const align = isCenterCol(idx)
+            ? AlignmentType.CENTER
+            : AlignmentType.RIGHT;
+
           return new TableCell({
+            verticalAlign: VerticalAlign.CENTER,
             width: { size: w, type: WidthType.PERCENTAGE },
             children: [
               new Paragraph({
+                alignment: align,
                 children: [new TextRun({ text: c, size: 18 })],
               }),
             ],

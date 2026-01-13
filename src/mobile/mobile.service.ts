@@ -185,16 +185,29 @@ function normalizeQ(q: string): string {
     .replace(/\s+/g, ' ');
 }
 
+function uniqStrings(arr: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const x of arr) {
+    const v = String(x || '').trim();
+    if (!v) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
 function mapShiftToMobileShift(params: {
   shift: ScheduleShift & {
     individual: Individual;
     service: Service;
     visits: Visit[];
   };
-  staffId: string;
+  staffIds: string[]; // ✅ accept multiple possible dspIds (internal id + employeeId legacy)
   date: string;
 }): MobileShift {
-  const { shift, staffId, date } = params;
+  const { shift, staffIds, date } = params;
   const individual = shift.individual;
   const service = shift.service;
   const visits = shift.visits ?? [];
@@ -211,7 +224,7 @@ function mapShiftToMobileShift(params: {
   }
 
   const visitsForDsp = visits.filter((v) => {
-    if (v.dspId !== staffId || !v.checkInAt) return false;
+    if (!staffIds.includes(v.dspId) || !v.checkInAt) return false;
     const localDateStr = DateTime.fromJSDate(v.checkInAt)
       .setZone(TZ)
       .toISODate();
@@ -270,9 +283,9 @@ function mapShiftToMobileShiftForClientDetail(params: {
     visits: Visit[];
   };
   date: string;
-  staffId?: string;
+  staffIds?: string[]; // ✅ optional multi-id filter
 }): MobileShift {
-  const { shift, date, staffId } = params;
+  const { shift, date, staffIds } = params;
   const individual = shift.individual;
   const service = shift.service;
   const visits = shift.visits ?? [];
@@ -288,8 +301,8 @@ function mapShiftToMobileShiftForClientDetail(params: {
       break;
   }
 
-  const visitsFiltered = staffId
-    ? visits.filter((v) => v.dspId === staffId)
+  const visitsFiltered = staffIds?.length
+    ? visits.filter((v) => staffIds.includes(v.dspId))
     : visits;
 
   const visitsSameDay = visitsFiltered.filter((v) => {
@@ -378,11 +391,19 @@ export class MobileService {
   ) {}
 
   /**
-   * Resolve Employee.id from either:
+   * Resolve staff identity from either:
    * - Employee.id (cuid)
    * - Employee.employeeId (human code like "BAC-E-2025-008")
+   *
+   * Returns:
+   * - techId: Employee.id (canonical)
+   * - employeeId: Employee.employeeId (human)
    */
-  private async resolveEmployeeId(staffIdRaw: string): Promise<string | null> {
+  private async resolveStaffIdentity(staffIdRaw: string): Promise<{
+    techId: string;
+    employeeId: string | null;
+    role: string | null;
+  } | null> {
     const staffId = String(staffIdRaw || '').trim();
     if (!staffId) return null;
 
@@ -390,10 +411,34 @@ export class MobileService {
       where: {
         OR: [{ id: staffId }, { employeeId: staffId }],
       },
-      select: { id: true },
+      select: { id: true, employeeId: true, role: true },
     });
 
-    return emp?.id ?? null;
+    if (!emp?.id) return null;
+
+    return {
+      techId: emp.id,
+      employeeId: emp.employeeId ?? null,
+      role: emp.role ?? null,
+    };
+  }
+
+  /**
+   * Build all possible legacy ids that might be stored in Visit.dspId:
+   * - Employee.id (canonical)
+   * - Employee.employeeId (legacy)
+   * - staffIdRaw (as-is, in case old data stored it directly)
+   */
+  private staffVisitIds(identity: {
+    techId: string;
+    employeeId: string | null;
+    staffIdRaw: string;
+  }): string[] {
+    return uniqStrings([
+      identity.techId,
+      identity.employeeId,
+      identity.staffIdRaw,
+    ]);
   }
 
   /**
@@ -411,8 +456,11 @@ export class MobileService {
     if (!isOfficeRole(emp.role)) return;
 
     // OfficeAttendanceEvent.staffId uses Employee.employeeId (human code)
+    const empCode = (emp.employeeId || '').trim();
+    if (!empCode) return;
+
     const open = await this.prisma.officeAttendanceEvent.findFirst({
-      where: { staffId: emp.employeeId, checkOutAt: null },
+      where: { staffId: empCode, checkOutAt: null },
       orderBy: { checkInAt: 'desc' },
       select: { id: true, checkInAt: true },
     });
@@ -483,12 +531,14 @@ export class MobileService {
       throw new BadRequestException('Please enter First Name and Last Name');
     }
 
-    const staffTechId = await this.resolveEmployeeId(staffIdRaw);
-    if (!staffTechId) {
+    const identity = await this.resolveStaffIdentity(staffIdRaw);
+    if (!identity) {
       throw new BadRequestException(`Employee not found: ${staffIdRaw}`);
     }
 
-    // ✅ Double-time block
+    const staffTechId = identity.techId;
+
+    // ✅ Double-time block (Office TK -> Visits)
     await this.ensureNotCheckedInOfficeTimeKeeping(staffTechId);
 
     const individual = await this.findIndividualByName(firstName, lastName);
@@ -547,6 +597,7 @@ export class MobileService {
           select: { id: true },
         });
 
+        // ✅ Store dspId in canonical techId (Employee.id)
         await tx.visit.create({
           data: {
             scheduleShiftId: shift.id,
@@ -670,7 +721,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // Today shifts for mobile (✅ normalize staffId)
+  // Today shifts for mobile (✅ support legacy dspId mismatch)
   // =====================================================
   async getTodayShifts(
     staffId: string,
@@ -683,7 +734,13 @@ export class MobileService {
       .endOf('day')
       .toJSDate();
 
-    const staffTechId = (await this.resolveEmployeeId(staffId)) ?? staffId;
+    const identity = await this.resolveStaffIdentity(staffId);
+    const staffTechId = identity?.techId ?? staffId;
+    const staffIds = this.staffVisitIds({
+      techId: staffTechId,
+      employeeId: identity?.employeeId ?? null,
+      staffIdRaw: staffId,
+    });
 
     const shifts = await this.prisma.scheduleShift.findMany({
       where: {
@@ -695,7 +752,7 @@ export class MobileService {
         service: true,
         visits: {
           where: {
-            dspId: staffTechId,
+            dspId: { in: staffIds },
             checkInAt: { gte: dayStartLocal, lte: dayEndLocal },
           },
           orderBy: { checkInAt: 'asc' },
@@ -706,7 +763,7 @@ export class MobileService {
 
     return {
       shifts: shifts.map((s) =>
-        mapShiftToMobileShift({ shift: s, staffId: staffTechId, date }),
+        mapShiftToMobileShift({ shift: s, staffIds, date }),
       ),
     };
   }
@@ -723,9 +780,16 @@ export class MobileService {
       .endOf('day')
       .toJSDate();
 
-    const staffTechId = staffId
-      ? ((await this.resolveEmployeeId(staffId)) ?? staffId)
-      : undefined;
+    let staffIds: string[] | undefined = undefined;
+    if (staffId) {
+      const identity = await this.resolveStaffIdentity(staffId);
+      const staffTechId = identity?.techId ?? staffId;
+      staffIds = this.staffVisitIds({
+        techId: staffTechId,
+        employeeId: identity?.employeeId ?? null,
+        staffIdRaw: staffId,
+      });
+    }
 
     const shifts = await this.prisma.scheduleShift.findMany({
       where: {
@@ -738,7 +802,7 @@ export class MobileService {
         visits: {
           where: {
             checkInAt: { gte: dayStartLocal, lte: dayEndLocal },
-            ...(staffTechId ? { dspId: staffTechId } : {}),
+            ...(staffIds?.length ? { dspId: { in: staffIds } } : {}),
           },
           orderBy: { checkInAt: 'asc' },
         },
@@ -751,14 +815,14 @@ export class MobileService {
         mapShiftToMobileShiftForClientDetail({
           shift: s,
           date,
-          staffId: staffTechId,
+          staffIds,
         }),
       ),
     };
   }
 
   // =====================================================
-  // Save Daily Note from mobile (✅ normalize staffId)
+  // Save Daily Note from mobile (✅ support legacy dspId mismatch)
   // =====================================================
   async submitDailyNote(payload: MobileDailyNotePayload) {
     const {
@@ -775,14 +839,20 @@ export class MobileService {
       mileage,
     } = payload;
 
-    const staffTechId = (await this.resolveEmployeeId(staffId)) ?? staffId;
+    const identity = await this.resolveStaffIdentity(staffId);
+    const staffTechId = identity?.techId ?? staffId;
+    const staffIds = this.staffVisitIds({
+      techId: staffTechId,
+      employeeId: identity?.employeeId ?? null,
+      staffIdRaw: staffId,
+    });
 
     const serviceDate = DateTime.fromISO(date, { zone: TZ })
       .startOf('day')
       .toJSDate();
 
     const visit = await this.prisma.visit.findFirst({
-      where: { scheduleShiftId: shiftId, dspId: staffTechId },
+      where: { scheduleShiftId: shiftId, dspId: { in: staffIds } },
       orderBy: { checkInAt: 'asc' },
     });
 
@@ -833,7 +903,7 @@ export class MobileService {
       data: {
         shiftId,
         individualId,
-        staffId: staffTechId,
+        staffId: staffTechId, // ✅ store canonical techId
         serviceId: service?.id ?? null,
         visitId: visit?.id ?? null,
         date: serviceDate,
@@ -888,16 +958,26 @@ export class MobileService {
   }
 
   // =====================================================
-  // Check-in (✅ double-time guard + normalize staffId)
+  // Check-in (✅ double-time guard + support legacy dspId mismatch)
   // =====================================================
   async checkInShift(
     shiftId: string,
     staffId: string,
     clientTime?: string,
   ): Promise<CheckInOutResponse> {
-    const staffTechId = (await this.resolveEmployeeId(staffId)) ?? staffId;
+    const identity = await this.resolveStaffIdentity(staffId);
+    if (!identity) {
+      throw new BadRequestException(`Employee not found: ${staffId}`);
+    }
 
-    // ✅ Double-time block
+    const staffTechId = identity.techId;
+    const staffIds = this.staffVisitIds({
+      techId: staffTechId,
+      employeeId: identity.employeeId ?? null,
+      staffIdRaw: staffId,
+    });
+
+    // ✅ Double-time block (Office TK -> Visits)
     await this.ensureNotCheckedInOfficeTimeKeeping(staffTechId);
 
     const checkInAt = clientTime
@@ -911,29 +991,64 @@ export class MobileService {
         individualId: true,
         serviceId: true,
         actualDspId: true,
+        status: true,
       },
     });
 
+    if (!shift) throw new NotFoundException('Shift not found');
+
+    // ✅ IMPORTANT: do NOT create duplicate open visits
+    // ✅ Also close the mismatch problem by searching dspId in [techId, employeeId, staffIdRaw]
+    const existingOpen = await this.prisma.visit.findFirst({
+      where: {
+        scheduleShiftId: shiftId,
+        dspId: { in: staffIds },
+        checkOutAt: null,
+      },
+      orderBy: { checkInAt: 'desc' },
+    });
+
+    if (existingOpen) {
+      // Ensure shift status is IN_PROGRESS
+      if (shift.status !== ScheduleStatus.IN_PROGRESS) {
+        await this.prisma.scheduleShift.update({
+          where: { id: shiftId },
+          data: {
+            status: ScheduleStatus.IN_PROGRESS,
+            actualDspId: shift.actualDspId ?? staffTechId,
+          },
+        });
+      }
+
+      return {
+        status: 'OK',
+        mode: 'IN',
+        shiftId,
+        staffId: staffTechId,
+        time: (existingOpen.checkInAt ?? checkInAt).toISOString(),
+        timesheetId: existingOpen.id,
+      };
+    }
+
+    // ✅ Create new visit with canonical dspId = Employee.id (techId)
     const visit = await this.prisma.visit.create({
       data: {
         scheduleShiftId: shiftId,
-        individualId: shift?.individualId ?? '',
+        individualId: shift.individualId ?? '',
         dspId: staffTechId,
-        serviceId: shift?.serviceId ?? null,
+        serviceId: shift.serviceId ?? null,
         checkInAt,
         source: VisitSource.MOBILE,
       },
     });
 
-    if (shift) {
-      await this.prisma.scheduleShift.update({
-        where: { id: shiftId },
-        data: {
-          status: ScheduleStatus.IN_PROGRESS,
-          actualDspId: shift.actualDspId ?? staffTechId,
-        },
-      });
-    }
+    await this.prisma.scheduleShift.update({
+      where: { id: shiftId },
+      data: {
+        status: ScheduleStatus.IN_PROGRESS,
+        actualDspId: shift.actualDspId ?? staffTechId,
+      },
+    });
 
     return {
       status: 'OK',
@@ -946,14 +1061,24 @@ export class MobileService {
   }
 
   // =====================================================
-  // Check-out (✅ normalize staffId)
+  // Check-out (✅ support legacy dspId mismatch)
   // =====================================================
   async checkOutShift(
     shiftId: string,
     staffId: string,
     clientTime?: string,
   ): Promise<CheckInOutResponse> {
-    const staffTechId = (await this.resolveEmployeeId(staffId)) ?? staffId;
+    const identity = await this.resolveStaffIdentity(staffId);
+    if (!identity) {
+      throw new BadRequestException(`Employee not found: ${staffId}`);
+    }
+
+    const staffTechId = identity.techId;
+    const staffIds = this.staffVisitIds({
+      techId: staffTechId,
+      employeeId: identity.employeeId ?? null,
+      staffIdRaw: staffId,
+    });
 
     const checkOutAt = clientTime
       ? DateTime.fromISO(clientTime, { setZone: true }).setZone(TZ).toJSDate()
@@ -969,35 +1094,51 @@ export class MobileService {
       },
     });
 
-    let visit = await this.prisma.visit.findFirst({
-      where: { scheduleShiftId: shiftId, dspId: staffTechId, checkOutAt: null },
-      orderBy: { checkInAt: 'desc' },
+    if (!shift) throw new NotFoundException('Shift not found');
+
+    // ✅ Close ALL open visits for this shift + dsp (cleanup dirty duplicates + legacy dspId mismatch)
+    const updated = await this.prisma.visit.updateMany({
+      where: {
+        scheduleShiftId: shiftId,
+        dspId: { in: staffIds },
+        checkOutAt: null,
+      },
+      data: { checkOutAt },
     });
 
-    if (visit) {
-      visit = await this.prisma.visit.update({
-        where: { id: visit.id },
-        data: { checkOutAt },
+    let timesheetId: string;
+
+    if (updated.count > 0) {
+      // Return the latest visit (now closed) just for display
+      const latest = await this.prisma.visit.findFirst({
+        where: { scheduleShiftId: shiftId, dspId: { in: staffIds } },
+        orderBy: { checkInAt: 'desc' },
+        select: { id: true },
       });
+      timesheetId = latest?.id ?? 'UNKNOWN';
     } else {
-      visit = await this.prisma.visit.create({
+      // No open visit -> create a 0-length visit to keep history consistent
+      // ✅ Store canonical dspId = techId
+      const created = await this.prisma.visit.create({
         data: {
           scheduleShiftId: shiftId,
-          individualId: shift?.individualId ?? '',
+          individualId: shift.individualId ?? '',
           dspId: staffTechId,
-          serviceId: shift?.serviceId ?? null,
+          serviceId: shift.serviceId ?? null,
           checkInAt: checkOutAt,
           checkOutAt,
           source: VisitSource.MOBILE,
         },
+        select: { id: true },
       });
+      timesheetId = created.id;
     }
 
     await this.prisma.scheduleShift.update({
       where: { id: shiftId },
       data: {
         status: ScheduleStatus.COMPLETED,
-        actualDspId: shift?.actualDspId ?? staffTechId,
+        actualDspId: shift.actualDspId ?? staffTechId,
       },
     });
 
@@ -1007,7 +1148,7 @@ export class MobileService {
       shiftId,
       staffId: staffTechId,
       time: checkOutAt.toISOString(),
-      timesheetId: visit.id,
+      timesheetId,
     };
   }
 }

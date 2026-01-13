@@ -10,6 +10,11 @@ import type { OfficeAttendanceSource } from '@prisma/client';
 
 const TZ = 'America/New_York';
 
+// ✅ If we see an "open Visit" with scheduleShiftId NULL (legacy dirty record),
+// we should NOT block Office Time Keeping forever.
+// If it's older than this threshold, treat as stale and ignore for blocking.
+const STALE_OPEN_VISIT_HOURS = 12;
+
 type AdminCtx = {
   userType: string; // ADMIN | HR | ...
   userEmail: string;
@@ -237,6 +242,100 @@ export class TimeKeepingService {
     }
   }
 
+  // ✅ NEW: map Employee.employeeId -> Employee.id (internal)
+  private async resolveEmployeeInternalIdByEmployeeId(employeeId: string) {
+    const emp = await this.prisma.employee.findFirst({
+      where: { employeeId },
+      select: { id: true },
+    });
+
+    if (!emp?.id) {
+      throw new NotFoundException(
+        'Employee profile not found. Please ensure this office user is linked to an Employee record.',
+      );
+    }
+
+    return emp.id;
+  }
+
+  /**
+   * ✅ Double-time guard (Office -> Schedule Weekly):
+   * If Office staff is currently checked-in on a Scheduled Shift (Visit open),
+   * block Office Time Keeping check-in to avoid overlapping work hours.
+   *
+   * IMPORTANT:
+   * - Visit.dspId may store either Employee.id (internal) OR Employee.employeeId (external).
+   * - Some data is dirty: schedule shift may be COMPLETED but Visit.checkOutAt still null.
+   * - Some dirty visits have scheduleShiftId NULL and checkOutAt NULL => can block forever if we don't handle.
+   *
+   * Strategy:
+   * - Find open Visit by dspId IN [internalId, employeeId]
+   * - If linked to scheduleShift with status COMPLETED/CANCELED => ignore (do not block)
+   * - If scheduleShiftId is NULL:
+   *   - If it's older than STALE_OPEN_VISIT_HOURS => ignore (treat as dirty)
+   *   - Else => block (it may be a real active unknown visit)
+   */
+  private async ensureNotCheckedInSchedule(staffEmployeeId: string) {
+    const employeeInternalId =
+      await this.resolveEmployeeInternalIdByEmployeeId(staffEmployeeId);
+
+    const openVisit = await this.prisma.visit.findFirst({
+      where: {
+        dspId: { in: [employeeInternalId, staffEmployeeId] },
+        checkOutAt: null,
+      },
+      select: {
+        id: true,
+        checkInAt: true,
+        dspId: true,
+        scheduleShiftId: true,
+        scheduleShift: {
+          select: { status: true },
+        } as any,
+      },
+      orderBy: { checkInAt: 'desc' },
+    } as any);
+
+    if (!openVisit) return;
+
+    // ✅ If schedule shift is already completed/canceled => do not block Office Time Keeping
+    const shiftStatus = (openVisit as any)?.scheduleShift?.status
+      ? String((openVisit as any).scheduleShift.status)
+      : '';
+
+    if (shiftStatus) {
+      const s = shiftStatus.toUpperCase();
+      if (s === 'COMPLETED' || s === 'CANCELED' || s === 'CANCELLED') {
+        return;
+      }
+    }
+
+    // ✅ If visit has NO scheduleShiftId => only block if it's "recent"
+    const hasShiftId = !!openVisit.scheduleShiftId;
+    if (!hasShiftId) {
+      const inAt = openVisit.checkInAt
+        ? DateTime.fromJSDate(openVisit.checkInAt).setZone(TZ)
+        : null;
+
+      if (inAt) {
+        const hoursOld = todayLocal().diff(inAt, 'hours').hours;
+        if (hoursOld >= STALE_OPEN_VISIT_HOURS) {
+          // Treat as dirty legacy open visit: do not block forever
+          return;
+        }
+      }
+      // Recent and no shiftId => block
+      throw new BadRequestException(
+        'You are currently checked in for a Scheduled Shift (Schedule Weekly). Please check out of the Scheduled Shift first before checking in to Office Time Keeping, to avoid overlapping work hours.',
+      );
+    }
+
+    // Otherwise block (real active scheduled shift)
+    throw new BadRequestException(
+      'You are currently checked in for a Scheduled Shift (Schedule Weekly). Please check out of the Scheduled Shift first before checking in to Office Time Keeping, to avoid overlapping work hours.',
+    );
+  }
+
   // =================== SELF ===================
 
   async getStatus(params: {
@@ -356,6 +455,10 @@ export class TimeKeepingService {
 
     // ✅ Option 1: If week already approved => block new attendance
     await this.ensureWeekNotApprovedForCheckIn(staffId, now);
+
+    // ✅ Double-time guard: If currently checked-in on Schedule (Visit open) => block
+    // (but ignore dirty COMPLETED shifts and stale no-shift open visits)
+    await this.ensureNotCheckedInSchedule(staffId);
 
     const open = await this.prisma.officeAttendanceEvent.findFirst({
       where: { staffId, checkOutAt: null },
