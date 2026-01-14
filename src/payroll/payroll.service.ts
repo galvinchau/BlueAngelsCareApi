@@ -16,6 +16,8 @@ import {
   TextRun,
   VerticalAlign,
   WidthType,
+  ShadingType,
+  BorderStyle,
 } from 'docx';
 
 import { PrismaService } from '../prisma/prisma.service';
@@ -706,47 +708,80 @@ export class PayrollService {
       ? DateTime.fromJSDate(run.generatedAt as any, { zone: TZ })
       : DateTime.now().setZone(TZ);
 
-    const headerLine = `Period: ${dto.periodFrom} → ${dto.periodTo}    |    Generated At: ${generatedAt.toFormat(
-      'yyyy-LL-dd HH:mm',
-    )} (${TZ})`;
+    // ✅ Format period like image #2 (MM/dd/yyyy)
+    const periodFrom = DateTime.fromISO(dto.periodFrom, { zone: TZ }).toFormat(
+      'LL/dd/yyyy',
+    );
+    const periodTo = DateTime.fromISO(dto.periodTo, { zone: TZ }).toFormat(
+      'LL/dd/yyyy',
+    );
 
-    const logoBuf = await this.tryLoadLogoBuffer();
+    // ✅ Per your request: ignore logo in DOC
+    // (keep tryLoadLogoBuffer() for future, but do not use here)
+    // const logoBuf = await this.tryLoadLogoBuffer();
 
     const doc = new Document({
       sections: [
         {
           properties: {
             page: {
-              size: { orientation: 'landscape' },
+              size: { orientation: 'landscape' }, // ✅ match image #2
               margin: { top: 720, right: 720, bottom: 720, left: 720 },
             },
           },
           children: [
-            this.buildCompanyHeader(logoBuf),
-
+            // ✅ Company header centered OUTSIDE table
             new Paragraph({
               alignment: AlignmentType.CENTER,
               children: [
                 new TextRun({
-                  text: 'Payroll Export (Details)',
+                  text: COMPANY_NAME,
                   bold: true,
-                  size: 30,
+                  size: 34,
+                  color: COMPANY_NAME_COLOR,
+                }),
+              ],
+            }),
+            new Paragraph({
+              alignment: AlignmentType.CENTER,
+              children: [new TextRun({ text: COMPANY_ADDRESS, size: 22 })],
+            }),
+            new Paragraph({
+              alignment: AlignmentType.CENTER,
+              children: [
+                new TextRun({ text: `Phone: ${COMPANY_PHONE}`, size: 22 }),
+              ],
+            }),
+            new Paragraph({ text: '' }),
+
+            // ✅ Title line like image #2
+            new Paragraph({
+              alignment: AlignmentType.CENTER,
+              children: [
+                new TextRun({ text: 'Payroll ', bold: true, size: 28 }),
+                new TextRun({
+                  text: 'Export',
+                  bold: true,
+                  size: 28,
+                  underline: {},
+                }),
+                new TextRun({ text: ' : ', bold: true, size: 28 }),
+                new TextRun({
+                  text: `Period:  ${periodFrom} - ${periodTo}`,
+                  size: 28,
                 }),
               ],
             }),
 
-            new Paragraph({
-              alignment: AlignmentType.CENTER,
-              children: [new TextRun({ text: headerLine, size: 20 })],
-            }),
-
             new Paragraph({ text: '' }),
 
+            // ✅ Main table with header shading + align rules
             this.buildTable(computed),
 
             new Paragraph({ text: '' }),
 
-            this.buildFooterApproval(generatedAt),
+            // ✅ Footer like image #2
+            this.buildFooterApprovalLikeImage2(generatedAt),
           ],
         },
       ],
@@ -763,6 +798,9 @@ export class PayrollService {
     return `${baseUrl}/exports/${fileName}`;
   }
 
+  // =====================================================
+  // OLD header/footer methods (kept, not removed)
+  // =====================================================
   private buildCompanyHeader(logoBuf: Buffer | null) {
     const logoCell = new TableCell({
       verticalAlign: VerticalAlign.CENTER,
@@ -867,6 +905,85 @@ export class PayrollService {
     return this.noBorderTable(t);
   }
 
+  // =====================================================
+  // NEW footer like image #2
+  // =====================================================
+  private buildFooterApprovalLikeImage2(generatedAt: DateTime) {
+    const dateText = `Date: ${generatedAt.toFormat('LL/dd/yyyy')}`;
+
+    const noBorders = {
+      top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      bottom: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      left: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      right: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+    };
+
+    const mkP = (text: string, bold = false, italics = false) =>
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [new TextRun({ text, bold, italics, size: 22 })],
+      });
+
+    const leftCell = new TableCell({
+      width: { size: 50, type: WidthType.PERCENTAGE },
+      verticalAlign: VerticalAlign.CENTER,
+      borders: noBorders,
+      children: [
+        mkP(dateText, true),
+        mkP('', false),
+        mkP('Approved by:', true),
+        mkP('CEO', true),
+        mkP('(Signed)', false, true),
+        mkP('', false),
+        mkP('Van Duong Chau', true),
+      ],
+    });
+
+    const rightCell = new TableCell({
+      width: { size: 50, type: WidthType.PERCENTAGE },
+      verticalAlign: VerticalAlign.CENTER,
+      borders: noBorders,
+      children: [
+        mkP(dateText, true),
+        mkP('', false),
+        mkP('Reviewed by:', true),
+        mkP('HR Department', true),
+        mkP('(Signed)', false, true),
+        mkP('', false),
+        mkP('Chanh Trung Nguyen', true),
+      ],
+    });
+
+    const t = new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          children: [leftCell, rightCell],
+        }),
+      ],
+    });
+
+    return this.noBorderTable(t);
+  }
+
+  // =====================================================
+  // TABLE formatting (header shading + wrap headers + align rules)
+  // =====================================================
+  private headerRuns(label: string) {
+    // Supports "Hours\n(HH:mm)" => two lines without widening column
+    const parts = (label || '').split('\n');
+    const runs: TextRun[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const text = parts[i];
+      if (i === 0) {
+        runs.push(new TextRun({ text, bold: true, size: 18 }));
+      } else {
+        runs.push(new TextRun({ text, bold: true, size: 18, break: 1 }));
+      }
+    }
+    return runs;
+  }
+
   private buildTable(items: Array<{ r: any; ex: any }>) {
     const headers = [
       'No.',
@@ -877,37 +994,40 @@ export class PayrollService {
       'Hours\n(HH:mm)',
       'OT\n(HH:mm)',
       'Training\nhour',
-      'Sick hour',
+      'Sick\nhour',
       'Holiday\nhour',
-      'PTO hour',
+      'PTO\nhour',
       'Mileage',
-      'Regular Pay',
+      'Regular\nPay',
       'OT\nPay',
       'Extras',
       'Total',
     ];
 
-    // ✅ Thu nhỏ Employee lại; nới nhẹ cho các cột tiền
+    // (kept from your current file) + small optimization:
+    // Employee smaller; money columns a bit wider
     const colWidthsPct = [
       4, // No.
-      15, // Employee (smaller)
-      8, // SSN#
-      6, // Type
-      7, // Rate
-      7, // Hours
-      7, // OT
-      7, // Training
-      6, // Sick
-      7, // Holiday
-      6, // PTO
-      6, // Mileage
-      9, // Regular Pay (wider)
-      8, // OT Pay (wider)
-      7, // Extras
-      8, // Total (wider)
+      12, // Employee
+      7, // SSN#
+      5, // Type
+      5, // Rate
+      5, // Hours
+      5, // OT
+      5, // Training
+      5, // Sick
+      5, // Holiday
+      5, // PTO
+      5, // Mileage
+      6, // Regular Pay
+      5, // OT Pay
+      5, // Extras
+      7, // Total
     ];
 
-    // ✅ header: canh giữa cả dòng & cột
+    // ✅ Header shading like image #2
+    const headerFill = 'C6E0B4'; // light green
+
     const headerRow = new TableRow({
       tableHeader: true,
       children: headers.map((h, idx) => {
@@ -915,19 +1035,17 @@ export class PayrollService {
         return new TableCell({
           verticalAlign: VerticalAlign.CENTER,
           width: { size: w, type: WidthType.PERCENTAGE },
+          shading: { type: ShadingType.CLEAR, color: 'auto', fill: headerFill },
           children: [
             new Paragraph({
               alignment: AlignmentType.CENTER,
-              children: [new TextRun({ text: h, bold: true, size: 18 })],
+              children: this.headerRuns(h),
             }),
           ],
         });
       }),
     });
 
-    // Helper align rule:
-    // - No, SSN#, Type => CENTER
-    // - All other columns => RIGHT
     const isCenterCol = (colIndex: number) =>
       colIndex === 0 || colIndex === 2 || colIndex === 3;
 
@@ -940,7 +1058,7 @@ export class PayrollService {
         fmtHHmm(Math.round((Number(r.otHours) || 0) * 60));
 
       const cells = [
-        String(i + 1), // No.
+        String(i + 1),
         safeText(r.staffName),
         safeText(r.employeeSSN),
         safeText(r.staffType),
@@ -961,9 +1079,14 @@ export class PayrollService {
       return new TableRow({
         children: cells.map((c, idx) => {
           const w = colWidthsPct[idx] ?? 6;
-          const align = isCenterCol(idx)
-            ? AlignmentType.CENTER
-            : AlignmentType.RIGHT;
+
+          // ✅ alignment rules per your request
+          let align: (typeof AlignmentType)[keyof typeof AlignmentType] =
+            AlignmentType.RIGHT;
+          if (isCenterCol(idx)) align = AlignmentType.CENTER;
+          if (idx === 1) align = AlignmentType.LEFT; // Employee body left
+
+          const isTotalCol = idx === cells.length - 1; // ✅ Total col
 
           return new TableCell({
             verticalAlign: VerticalAlign.CENTER,
@@ -971,7 +1094,9 @@ export class PayrollService {
             children: [
               new Paragraph({
                 alignment: align,
-                children: [new TextRun({ text: c, size: 18 })],
+                children: [
+                  new TextRun({ text: c, size: 18, bold: isTotalCol }),
+                ],
               }),
             ],
           });
