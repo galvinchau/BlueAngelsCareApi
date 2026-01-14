@@ -23,6 +23,9 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import type { PayrollExportDto } from './dto/payroll-export.dto';
 
+// ✅ NEW: only count visits that belong to a COMPLETED ScheduleShift
+import { ScheduleStatus } from '@prisma/client';
+
 const TZ = 'America/New_York';
 
 // =========================
@@ -182,6 +185,27 @@ export class PayrollService {
     return table;
   }
 
+  /**
+   * ✅ NEW: Build dspId alias map to normalize Visit.dspId.
+   * In DB, Visit.dspId may contain:
+   * - Employee.id (internal cuid)
+   * - Employee.employeeId (human code like "BAC-E-2025-008") [legacy]
+   *
+   * We normalize both to Employee.id so payroll is consistent.
+   */
+  private async buildDspAliasToTechIdMap(): Promise<Map<string, string>> {
+    const emps = await this.prisma.employee.findMany({
+      select: { id: true, employeeId: true },
+    });
+
+    const map = new Map<string, string>();
+    for (const e of emps) {
+      if (e?.id) map.set(e.id, e.id);
+      if (e?.employeeId) map.set(e.employeeId, e.id);
+    }
+    return map;
+  }
+
   // -------------------------
   // GET /payroll/employees
   // -------------------------
@@ -312,20 +336,32 @@ export class PayrollService {
 
   // -------------------------
   // VISIT minutes (dedup + merge overlap)
+  // - normalize Visit.dspId to Employee.id (tech id)
+  // - ✅ ONLY count visits whose ScheduleShift is COMPLETED
   // -------------------------
   private async getVisitMinutesByEmployeeTechId(
     fromDt: DateTime,
     toExclusive: DateTime,
+    dspAliasToTechId: Map<string, string>,
   ) {
     const visits = await this.prisma.visit.findMany({
       where: {
         checkInAt: { gte: fromDt.toJSDate(), lt: toExclusive.toJSDate() },
-        checkOutAt: { not: null },
+        checkOutAt: { not: null }, // ✅ ONLY closed visits count for payroll
+
+        // ✅ NEW RULE: must be linked to a ScheduleShift
+        scheduleShiftId: { not: null },
+
+        // ✅ NEW RULE: and shift must be COMPLETED
+        scheduleShift: {
+          is: { status: ScheduleStatus.COMPLETED },
+        },
       },
       select: {
         id: true,
         dspId: true,
         individualId: true,
+        scheduleShiftId: true, // ✅ for debugging / auditing
         checkInAt: true,
         checkOutAt: true,
         durationMinutes: true,
@@ -336,6 +372,7 @@ export class PayrollService {
       string,
       Array<{
         visitId: string;
+        originalDspId: string;
         individualId: string | null;
         startMs: number;
         endMs: number;
@@ -362,15 +399,19 @@ export class PayrollService {
 
       if (minutes <= 0) continue;
 
-      const arr = rawByDsp.get(v.dspId) || [];
+      // ✅ Normalize dspId to techId (Employee.id)
+      const canonicalTechId = dspAliasToTechId.get(v.dspId) || v.dspId;
+
+      const arr = rawByDsp.get(canonicalTechId) || [];
       arr.push({
         visitId: v.id,
+        originalDspId: v.dspId,
         individualId: v.individualId ?? null,
         startMs,
         endMs,
         minutes,
       });
-      rawByDsp.set(v.dspId, arr);
+      rawByDsp.set(canonicalTechId, arr);
     }
 
     const minutesByDsp = new Map<string, number>();
@@ -378,6 +419,7 @@ export class PayrollService {
       string,
       Array<{
         visitId: string;
+        originalDspId: string;
         checkInAt: string;
         checkOutAt: string;
         minutes: number;
@@ -385,11 +427,12 @@ export class PayrollService {
       }>
     >();
 
-    for (const [dspId, arr] of rawByDsp.entries()) {
+    for (const [dspTechId, arr] of rawByDsp.entries()) {
       const seen = new Set<string>();
       const dedup: Interval[] = [];
       const dbg: Array<{
         visitId: string;
+        originalDspId: string;
         checkInAt: string;
         checkOutAt: string;
         minutes: number;
@@ -397,7 +440,8 @@ export class PayrollService {
       }> = [];
 
       for (const it of arr) {
-        const key = `${dspId}|${it.individualId || ''}|${it.startMs}|${it.endMs}`;
+        // ✅ Dedup by (techId + individual + interval)
+        const key = `${dspTechId}|${it.individualId || ''}|${it.startMs}|${it.endMs}`;
         if (seen.has(key)) continue;
         seen.add(key);
 
@@ -405,6 +449,7 @@ export class PayrollService {
 
         dbg.push({
           visitId: it.visitId,
+          originalDspId: it.originalDspId,
           checkInAt:
             DateTime.fromMillis(it.startMs, { zone: TZ }).toISO() || '',
           checkOutAt: DateTime.fromMillis(it.endMs, { zone: TZ }).toISO() || '',
@@ -416,8 +461,8 @@ export class PayrollService {
       const merged = mergeIntervals(dedup);
       const totalMinutes = sumIntervalsMinutes(merged);
 
-      minutesByDsp.set(dspId, totalMinutes);
-      debugVisitsByDsp.set(dspId, dbg);
+      minutesByDsp.set(dspTechId, totalMinutes);
+      debugVisitsByDsp.set(dspTechId, dbg);
     }
 
     return { minutesByDsp, debugVisitsByDsp };
@@ -452,8 +497,15 @@ export class PayrollService {
     });
     const rateMap = new Map(rates.map((r) => [r.employeeId, r]));
 
+    // ✅ NEW: normalize Visit.dspId (legacy employeeId vs new techId)
+    const dspAliasToTechId = await this.buildDspAliasToTechIdMap();
+
     const { minutesByDsp, debugVisitsByDsp } =
-      await this.getVisitMinutesByEmployeeTechId(fromDt, toExclusive);
+      await this.getVisitMinutesByEmployeeTechId(
+        fromDt,
+        toExclusive,
+        dspAliasToTechId,
+      );
 
     const officeApprovals = await this.prisma.officeWeeklyApproval.findMany({
       where: {
@@ -498,6 +550,8 @@ export class PayrollService {
           : 0.3;
 
       const officeFinalMinutes = officeMinutesByStaffId.get(staffId) || 0;
+
+      // ✅ Visit minutes keyed by Employee.id (tech) after normalization
       const visitMinutes = minutesByDsp.get(e.id) || 0;
 
       let minutes = 0;
@@ -716,10 +770,6 @@ export class PayrollService {
       'LL/dd/yyyy',
     );
 
-    // ✅ Per your request: ignore logo in DOC
-    // (keep tryLoadLogoBuffer() for future, but do not use here)
-    // const logoBuf = await this.tryLoadLogoBuffer();
-
     const doc = new Document({
       sections: [
         {
@@ -730,7 +780,6 @@ export class PayrollService {
             },
           },
           children: [
-            // ✅ Company header centered OUTSIDE table
             new Paragraph({
               alignment: AlignmentType.CENTER,
               children: [
@@ -754,7 +803,6 @@ export class PayrollService {
             }),
             new Paragraph({ text: '' }),
 
-            // ✅ Title line like image #2
             new Paragraph({
               alignment: AlignmentType.CENTER,
               children: [
@@ -775,12 +823,10 @@ export class PayrollService {
 
             new Paragraph({ text: '' }),
 
-            // ✅ Main table with header shading + align rules
             this.buildTable(computed),
 
             new Paragraph({ text: '' }),
 
-            // ✅ Footer like image #2
             this.buildFooterApprovalLikeImage2(generatedAt),
           ],
         },
@@ -970,7 +1016,6 @@ export class PayrollService {
   // TABLE formatting (header shading + wrap headers + align rules)
   // =====================================================
   private headerRuns(label: string) {
-    // Supports "Hours\n(HH:mm)" => two lines without widening column
     const parts = (label || '').split('\n');
     const runs: TextRun[] = [];
     for (let i = 0; i < parts.length; i++) {
@@ -1004,8 +1049,6 @@ export class PayrollService {
       'Total',
     ];
 
-    // (kept from your current file) + small optimization:
-    // Employee smaller; money columns a bit wider
     const colWidthsPct = [
       4, // No.
       12, // Employee
@@ -1025,8 +1068,7 @@ export class PayrollService {
       7, // Total
     ];
 
-    // ✅ Header shading like image #2
-    const headerFill = 'C6E0B4'; // light green
+    const headerFill = 'C6E0B4';
 
     const headerRow = new TableRow({
       tableHeader: true,
@@ -1080,13 +1122,12 @@ export class PayrollService {
         children: cells.map((c, idx) => {
           const w = colWidthsPct[idx] ?? 6;
 
-          // ✅ alignment rules per your request
           let align: (typeof AlignmentType)[keyof typeof AlignmentType] =
             AlignmentType.RIGHT;
           if (isCenterCol(idx)) align = AlignmentType.CENTER;
           if (idx === 1) align = AlignmentType.LEFT; // Employee body left
 
-          const isTotalCol = idx === cells.length - 1; // ✅ Total col
+          const isTotalCol = idx === cells.length - 1;
 
           return new TableCell({
             verticalAlign: VerticalAlign.CENTER,
