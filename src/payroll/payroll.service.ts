@@ -469,26 +469,26 @@ export class PayrollService {
   }
 
   // -------------------------
-// POST /payroll/generate
-// -------------------------
-async generate(from: string, to: string) {
-  const { fromDt, toExclusive } = this.computePeriod(from, to);
+  // POST /payroll/generate
+  // -------------------------
+  async generate(from: string, to: string) {
+    const { fromDt, toExclusive } = this.computePeriod(from, to);
 
-  const employees = await this.prisma.employee.findMany({
-    where: {
-      status: 'Active', // ✅ ONLY Active employees appear in payroll
-    },
-    orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
-    select: {
-      id: true,
-      employeeId: true,
-      firstName: true,
-      lastName: true,
-      role: true,
-      ssn: true,
-      status: true,
-    },
-  });
+    const employees = await this.prisma.employee.findMany({
+      where: {
+        status: 'Active', // ✅ ONLY Active employees appear in payroll
+      },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+      select: {
+        id: true,
+        employeeId: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        ssn: true,
+        status: true,
+      },
+    });
 
     const rates = await this.prisma.payrollRate.findMany({
       select: {
