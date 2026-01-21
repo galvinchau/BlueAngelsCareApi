@@ -30,7 +30,8 @@ model Individual {
   lastName   String
   dob        String // YYYY-MM-DD
   gender     String?
-  ssnLast4   String? // chỉ 4 số
+  ssnLast4    String?
+  medicaidId  String?  @db.VarChar(32)
 
   branch   String
   location String
