@@ -13,6 +13,14 @@ datasource db {
  * Individual = hồ sơ bệnh nhân/khách hàng
  * code      = mã hiển thị: IND-2025-000001
  */
+
+// ✅ NEW: Individual status (for Pending/Active/Inactive)
+enum IndividualStatus {
+  PENDING
+  ACTIVE
+  INACTIVE
+}
+
 model Individual {
   id   String @id @default(cuid()) // khoá kỹ thuật
   code String @unique // mã hiển thị, sẽ sinh từ Counter
@@ -26,6 +34,9 @@ model Individual {
 
   branch   String
   location String
+
+  // ✅ NEW: status for operations (Pending/Active/Inactive)
+  status IndividualStatus @default(PENDING)
 
   primaryPhone   String?
   secondaryPhone String?
