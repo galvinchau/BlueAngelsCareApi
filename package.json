@@ -72,6 +72,13 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.20.0"
   },
+
+  "pnpm": {
+    "overrides": {
+      "lru-cache": "^11.0.2"
+    }
+  },
+
   "jest": {
     "moduleFileExtensions": [
       "js",
