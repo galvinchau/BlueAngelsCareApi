@@ -42,6 +42,19 @@ export class MobileController {
   }
 
   /**
+   * ✅ 3-week shifts window (Prev + Current + Next week)
+   * GET /mobile/shifts/window?staffId=...&date=YYYY-MM-DD
+   * - date is optional (if omitted, uses "today" in America/New_York)
+   */
+  @Get('shifts/window')
+  getShiftsWindow(
+    @Query('staffId') staffId: string,
+    @Query('date') date?: string,
+  ) {
+    return this.mobileService.getShiftsWindow(staffId, date);
+  }
+
+  /**
    * ✅ Search Individuals
    * GET /mobile/individuals?search=...
    */

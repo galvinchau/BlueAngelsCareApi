@@ -768,6 +768,67 @@ export class MobileService {
     };
   }
 
+  // =====================================================
+  // ✅ 3-week shifts window for mobile (Prev + Current + Next week)
+  // GET /mobile/shifts/window?staffId=...&date=YYYY-MM-DD (date optional)
+  // =====================================================
+  async getShiftsWindow(
+    staffId: string,
+    date?: string,
+  ): Promise<{ shifts: MobileShift[] }> {
+    const identity = await this.resolveStaffIdentity(staffId);
+    const staffTechId = identity?.techId ?? staffId;
+
+    const staffIds = this.staffVisitIds({
+      techId: staffTechId,
+      employeeId: identity?.employeeId ?? null,
+      staffIdRaw: staffId,
+    });
+
+    const nowTz = date
+      ? DateTime.fromISO(date, { zone: TZ })
+      : DateTime.now().setZone(TZ);
+
+    // Current week window (Sun..Sat) using existing helper
+    const { weekStart } = this.getWeekWindow(nowTz);
+
+    // Range: previous week start -> end of next week (3 weeks total)
+    const rangeStart = weekStart.minus({ days: 7 }).startOf('day');
+    const rangeEnd = weekStart.plus({ days: 14 }).minus({ milliseconds: 1 });
+
+    const rangeStartJs = rangeStart.toJSDate();
+    const rangeEndJs = rangeEnd.toJSDate();
+
+    const shifts = await this.prisma.scheduleShift.findMany({
+      where: {
+        scheduleDate: { gte: rangeStartJs, lte: rangeEndJs },
+        OR: [{ plannedDspId: staffTechId }, { actualDspId: staffTechId }],
+      },
+      include: {
+        individual: true,
+        service: true,
+        visits: {
+          where: {
+            dspId: { in: staffIds },
+            checkInAt: { gte: rangeStartJs, lte: rangeEndJs },
+          },
+          orderBy: { checkInAt: 'asc' },
+        },
+      },
+      orderBy: [{ scheduleDate: 'asc' }, { plannedStart: 'asc' }],
+    });
+
+    return {
+      shifts: shifts.map((s) => {
+        const d = DateTime.fromJSDate(s.scheduleDate)
+          .setZone(TZ)
+          .toISODate() as string;
+
+        return mapShiftToMobileShift({ shift: s, staffIds, date: d });
+      }),
+    };
+  }
+
   async getTodayShiftsForIndividual(
     individualId: string,
     date: string,
