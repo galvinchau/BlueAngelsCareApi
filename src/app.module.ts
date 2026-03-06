@@ -20,6 +20,9 @@ import { EmployeesModule } from './employees/employees.module';
 // ✅ PAYROLL
 import { PayrollModule } from './payroll/payroll.module';
 
+// ✅ MAIL (NEW)
+import { MailModule } from './mail/mail.module';
+
 @Module({
   imports: [
     // ✅ Serve /exports/* from local folder: uploads/exports
@@ -29,8 +32,11 @@ import { PayrollModule } from './payroll/payroll.module';
     }),
 
     PrismaModule,
+
+    // ✅ Mobile API
     MobileModule,
     MobileAuthModule,
+
     ReportsModule,
 
     // ✅ NEW
@@ -39,6 +45,9 @@ import { PayrollModule } from './payroll/payroll.module';
 
     // ✅ PAYROLL
     PayrollModule,
+
+    // ✅ MAIL (NEW)
+    MailModule,
   ],
   controllers: [
     AppController,

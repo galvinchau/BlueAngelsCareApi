@@ -98,6 +98,28 @@ export interface MobileDailyNotePayload {
   overReason?: string;
 }
 
+// ✅ NEW: Health & Incident payload from Mobile
+export interface MobileHealthIncidentPayload {
+  staffId: string;
+  staffName?: string;
+  staffEmail?: string;
+
+  individualId?: string | null;
+  individualName?: string | null;
+
+  // optional link to shift/visit
+  shiftId?: string | null;
+
+  // YYYY-MM-DD (local)
+  date: string;
+
+  // full form data (matches Word form fields on mobile)
+  payload: Record<string, any>;
+
+  // optional: allow status from client (default SUBMITTED)
+  status?: 'DRAFT' | 'SUBMITTED';
+}
+
 export type CheckMode = 'IN' | 'OUT';
 
 export interface CheckInOutResponse {
@@ -204,7 +226,7 @@ function mapShiftToMobileShift(params: {
     service: Service;
     visits: Visit[];
   };
-  staffIds: string[]; // ✅ accept multiple possible dspIds (internal id + employeeId legacy)
+  staffIds: string[];
   date: string;
 }): MobileShift {
   const { shift, staffIds, date } = params;
@@ -283,7 +305,7 @@ function mapShiftToMobileShiftForClientDetail(params: {
     visits: Visit[];
   };
   date: string;
-  staffIds?: string[]; // ✅ optional multi-id filter
+  staffIds?: string[];
 }): MobileShift {
   const { shift, date, staffIds } = params;
   const individual = shift.individual;
@@ -390,15 +412,6 @@ export class MobileService {
     private readonly reportsService: GoogleReportsService,
   ) {}
 
-  /**
-   * Resolve staff identity from either:
-   * - Employee.id (cuid)
-   * - Employee.employeeId (human code like "BAC-E-2025-008")
-   *
-   * Returns:
-   * - techId: Employee.id (canonical)
-   * - employeeId: Employee.employeeId (human)
-   */
   private async resolveStaffIdentity(staffIdRaw: string): Promise<{
     techId: string;
     employeeId: string | null;
@@ -423,12 +436,6 @@ export class MobileService {
     };
   }
 
-  /**
-   * Build all possible legacy ids that might be stored in Visit.dspId:
-   * - Employee.id (canonical)
-   * - Employee.employeeId (legacy)
-   * - staffIdRaw (as-is, in case old data stored it directly)
-   */
   private staffVisitIds(identity: {
     techId: string;
     employeeId: string | null;
@@ -441,11 +448,6 @@ export class MobileService {
     ]);
   }
 
-  /**
-   * ✅ Double-time guard:
-   * If this staff is Office role AND has open OfficeAttendanceEvent (IN),
-   * block visit check-in until office check-out happens.
-   */
   private async ensureNotCheckedInOfficeTimeKeeping(staffTechId: string) {
     const emp = await this.prisma.employee.findUnique({
       where: { id: staffTechId },
@@ -455,7 +457,6 @@ export class MobileService {
     if (!emp) return;
     if (!isOfficeRole(emp.role)) return;
 
-    // OfficeAttendanceEvent.staffId uses Employee.employeeId (human code)
     const empCode = (emp.employeeId || '').trim();
     if (!empCode) return;
 
@@ -538,7 +539,6 @@ export class MobileService {
 
     const staffTechId = identity.techId;
 
-    // ✅ Double-time block (Office TK -> Visits)
     await this.ensureNotCheckedInOfficeTimeKeeping(staffTechId);
 
     const individual = await this.findIndividualByName(firstName, lastName);
@@ -597,7 +597,6 @@ export class MobileService {
           select: { id: true },
         });
 
-        // ✅ Store dspId in canonical techId (Employee.id)
         await tx.visit.create({
           data: {
             scheduleShiftId: shift.id,
@@ -721,7 +720,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // Today shifts for mobile (✅ support legacy dspId mismatch)
+  // Today shifts for mobile
   // =====================================================
   async getTodayShifts(
     staffId: string,
@@ -769,8 +768,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // ✅ 3-week shifts window for mobile (Prev + Current + Next week)
-  // GET /mobile/shifts/window?staffId=...&date=YYYY-MM-DD (date optional)
+  // 3-week shifts window
   // =====================================================
   async getShiftsWindow(
     staffId: string,
@@ -789,10 +787,8 @@ export class MobileService {
       ? DateTime.fromISO(date, { zone: TZ })
       : DateTime.now().setZone(TZ);
 
-    // Current week window (Sun..Sat) using existing helper
     const { weekStart } = this.getWeekWindow(nowTz);
 
-    // Range: previous week start -> end of next week (3 weeks total)
     const rangeStart = weekStart.minus({ days: 7 }).startOf('day');
     const rangeEnd = weekStart.plus({ days: 14 }).minus({ milliseconds: 1 });
 
@@ -883,7 +879,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // Save Daily Note from mobile (✅ support legacy dspId mismatch)
+  // Save Daily Note from mobile
   // =====================================================
   async submitDailyNote(payload: MobileDailyNotePayload) {
     const {
@@ -939,7 +935,7 @@ export class MobileService {
 
     const overMinutes =
       plannedMins !== null && visitedMins !== null && visitedMins > plannedMins
-        ? visitedMins - plannedMins
+        ? visitedMins - visitedMins + (visitedMins - plannedMins)
         : 0;
 
     const underHours = lostMinutes > 0 ? minutesToHoursStr(lostMinutes) : '';
@@ -964,7 +960,7 @@ export class MobileService {
       data: {
         shiftId,
         individualId,
-        staffId: staffTechId, // ✅ store canonical techId
+        staffId: staffTechId,
         serviceId: service?.id ?? null,
         visitId: visit?.id ?? null,
         date: serviceDate,
@@ -1019,7 +1015,76 @@ export class MobileService {
   }
 
   // =====================================================
-  // Check-in (✅ double-time guard + support legacy dspId mismatch)
+  // ✅ NEW: Save Health & Incident from mobile (DB)
+  // POST /mobile/health-incident
+  // =====================================================
+  async submitHealthIncident(payload: MobileHealthIncidentPayload) {
+    const staffIdRaw = String(payload?.staffId ?? '').trim();
+    if (!staffIdRaw) throw new BadRequestException('Missing staffId');
+
+    const dateStr = String(payload?.date ?? '').trim();
+    if (!dateStr) throw new BadRequestException('Missing date (YYYY-MM-DD)');
+
+    const identity = await this.resolveStaffIdentity(staffIdRaw);
+    const staffTechId = identity?.techId ?? staffIdRaw;
+
+    const serviceDate = DateTime.fromISO(dateStr, { zone: TZ })
+      .startOf('day')
+      .toJSDate();
+
+    const status = payload?.status === 'DRAFT' ? 'DRAFT' : 'SUBMITTED';
+
+    const prismaAny = this.prisma as any;
+    if (!prismaAny?.healthIncidentReport?.create) {
+      // ✅ align to your workflow: NO migrate, use SQL + generate
+      throw new BadRequestException(
+        'HealthIncidentReport is not deployed yet. Please run Supabase SQL to create the table, then run pnpm prisma generate.',
+      );
+    }
+
+    try {
+      const record = await prismaAny.healthIncidentReport.create({
+        data: {
+          shiftId: payload.shiftId ?? null,
+          staffId: staffTechId,
+          staffName: payload.staffName ?? null,
+          staffEmail: payload.staffEmail ?? null,
+
+          individualId: payload.individualId ?? null,
+          individualName: payload.individualName ?? null,
+
+          date: serviceDate,
+
+          status,
+          submittedAt: status === 'SUBMITTED' ? new Date() : null,
+
+          payload: (payload.payload ?? {}) as object,
+
+          supervisorName: null,
+          supervisorDecision: null,
+          supervisorActionsTaken: null,
+          reviewedAt: null,
+        },
+        select: { id: true },
+      });
+
+      return { status: 'OK', id: record.id };
+    } catch (err: any) {
+      console.error('[MobileService] submitHealthIncident failed', {
+        staffIdRaw,
+        staffTechId,
+        dateStr,
+        err: err?.message ?? err,
+      });
+
+      throw new BadRequestException(
+        'Unable to save Health & Incident report right now.',
+      );
+    }
+  }
+
+  // =====================================================
+  // Check-in
   // =====================================================
   async checkInShift(
     shiftId: string,
@@ -1038,7 +1103,6 @@ export class MobileService {
       staffIdRaw: staffId,
     });
 
-    // ✅ Double-time block (Office TK -> Visits)
     await this.ensureNotCheckedInOfficeTimeKeeping(staffTechId);
 
     const checkInAt = clientTime
@@ -1058,8 +1122,6 @@ export class MobileService {
 
     if (!shift) throw new NotFoundException('Shift not found');
 
-    // ✅ IMPORTANT: do NOT create duplicate open visits
-    // ✅ Also close the mismatch problem by searching dspId in [techId, employeeId, staffIdRaw]
     const existingOpen = await this.prisma.visit.findFirst({
       where: {
         scheduleShiftId: shiftId,
@@ -1070,7 +1132,6 @@ export class MobileService {
     });
 
     if (existingOpen) {
-      // Ensure shift status is IN_PROGRESS
       if (shift.status !== ScheduleStatus.IN_PROGRESS) {
         await this.prisma.scheduleShift.update({
           where: { id: shiftId },
@@ -1091,7 +1152,6 @@ export class MobileService {
       };
     }
 
-    // ✅ Create new visit with canonical dspId = Employee.id (techId)
     const visit = await this.prisma.visit.create({
       data: {
         scheduleShiftId: shiftId,
@@ -1122,7 +1182,7 @@ export class MobileService {
   }
 
   // =====================================================
-  // Check-out (✅ support legacy dspId mismatch)
+  // Check-out
   // =====================================================
   async checkOutShift(
     shiftId: string,
@@ -1157,7 +1217,6 @@ export class MobileService {
 
     if (!shift) throw new NotFoundException('Shift not found');
 
-    // ✅ Close ALL open visits for this shift + dsp (cleanup dirty duplicates + legacy dspId mismatch)
     const updated = await this.prisma.visit.updateMany({
       where: {
         scheduleShiftId: shiftId,
@@ -1170,7 +1229,6 @@ export class MobileService {
     let timesheetId: string;
 
     if (updated.count > 0) {
-      // Return the latest visit (now closed) just for display
       const latest = await this.prisma.visit.findFirst({
         where: { scheduleShiftId: shiftId, dspId: { in: staffIds } },
         orderBy: { checkInAt: 'desc' },
@@ -1178,8 +1236,6 @@ export class MobileService {
       });
       timesheetId = latest?.id ?? 'UNKNOWN';
     } else {
-      // No open visit -> create a 0-length visit to keep history consistent
-      // ✅ Store canonical dspId = techId
       const created = await this.prisma.visit.create({
         data: {
           scheduleShiftId: shiftId,

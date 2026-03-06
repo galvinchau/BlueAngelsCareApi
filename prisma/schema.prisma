@@ -30,8 +30,8 @@ model Individual {
   lastName   String
   dob        String // YYYY-MM-DD
   gender     String?
-  ssnLast4    String?
-  medicaidId  String?  @db.VarChar(32)
+  ssnLast4   String?
+  medicaidId String? @db.VarChar(32)
 
   branch   String
   location String
@@ -130,6 +130,7 @@ model Individual {
   scheduleShifts          ScheduleShift[]
   visits                  Visit[]
   ispAllocations          ISPAllocation[]
+  healthIncidentReports   HealthIncidentReport[]
 
   // ISP & BSP form (lưu toàn bộ dữ liệu form dạng JSON)
   ispBspForm IspBspForm?
@@ -199,10 +200,11 @@ model Employee {
   updatedAt DateTime @updatedAt
 
   // Relations mới
-  templateDefaultShifts MasterTemplateShift[] @relation("TemplateDefaultDSP")
-  plannedShifts         ScheduleShift[]       @relation("PlannedDSP")
-  actualShifts          ScheduleShift[]       @relation("ActualDSP")
-  visits                Visit[]               @relation("VisitDSP")
+  templateDefaultShifts MasterTemplateShift[]  @relation("TemplateDefaultDSP")
+  plannedShifts         ScheduleShift[]        @relation("PlannedDSP")
+  actualShifts          ScheduleShift[]        @relation("ActualDSP")
+  visits                Visit[]                @relation("VisitDSP")
+  healthIncidentReports HealthIncidentReport[]
 
   // Supervisors cho Admin Users
   userSupervisors UserSupervisor[]
@@ -438,10 +440,10 @@ model ScheduleShift {
   plannedDsp Employee? @relation("PlannedDSP", fields: [plannedDspId], references: [id])
   actualDsp  Employee? @relation("ActualDSP", fields: [actualDspId], references: [id])
 
-  visits Visit[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  visits                Visit[]
+  healthIncidentReports HealthIncidentReport[]
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
 
   @@index([weekId])
   @@index([scheduleDate])
@@ -468,12 +470,12 @@ model Visit {
   source VisitSource @default(MOBILE)
 
   // cache sẵn để report nhanh (tính khi close visit)
-  durationMinutes   Int? // tổng số phút (Out - In, có xử lý qua ngày)
-  units             Int? // số unit 15 phút
+  durationMinutes   Int?
+  units             Int?
   isBillable        Boolean @default(true)
   nonBillableReason String?
 
-  gpsLatitude  Float? // optional – sau này dùng cho GPS
+  gpsLatitude  Float?
   gpsLongitude Float?
 
   scheduleShift ScheduleShift? @relation(fields: [scheduleShiftId], references: [id])
@@ -525,8 +527,8 @@ model DailyNote {
   payload Json
 
   // Sau này Phase DOC/PDF sẽ dùng 2 field này
-  staffReportFileId      String? // file trên REPORTS-STAFT
-  individualReportFileId String? // file trên REPORTS-INDIVIDUAL
+  staffReportFileId      String?
+  individualReportFileId String?
 
   // NEW: direct-download report paths (saved on server filesystem)
   staffReportDocPath      String?
@@ -550,14 +552,14 @@ model ISPAllocation {
   id           String  @id @default(cuid())
   individualId String
   serviceId    String
-  payerId      String? // Medicaid, ODP, etc.
+  payerId      String?
 
-  startDate DateTime // ngày bắt đầu ủy quyền
-  endDate   DateTime? // ngày kết thúc (hết hợp đồng)
+  startDate DateTime
+  endDate   DateTime?
 
-  unitsPerWeek         Int? // ISP quy định mỗi tuần bao nhiêu unit
-  unitsPerMonth        Int? // hoặc mỗi tháng
-  totalAuthorizedUnits Int? // tổng số unit cho cả hợp đồng
+  unitsPerWeek         Int?
+  unitsPerMonth        Int?
+  totalAuthorizedUnits Int?
 
   notes String?
 
@@ -596,7 +598,7 @@ model User {
   firstName String
   lastName  String
   locked    Boolean @default(false)
-  userType  String  @default("ADMIN") // ADMIN / COORDINATOR / DSP / ...
+  userType  String  @default("ADMIN")
 
   roles       UserRole[]
   privileges  UserPrivilege[]
@@ -615,8 +617,8 @@ model User {
 
 model Role {
   id          String  @id @default(cuid())
-  code        String  @unique // vd: "COORDINATOR"
-  name        String // label hiển thị đẹp
+  code        String  @unique
+  name        String
   description String?
 
   users UserRole[]
@@ -629,8 +631,8 @@ model Role {
 
 model Privilege {
   id          String  @id @default(cuid())
-  code        String  @unique // vd: "CLIENT_ACCESS_MODULE"
-  name        String // label hiển thị dài
+  code        String  @unique
+  name        String
   description String?
 
   users UserPrivilege[]
@@ -693,6 +695,7 @@ enum MedicationOrderStatus {
 
 // Trạng thái từng lần uống/tiêm trong MAR
 enum MedicationAdminStatus {
+  SCHEDULED
   GIVEN
   REFUSED
   MISSED
@@ -717,105 +720,116 @@ enum MedicationIncidentStatus {
 
 /**
  * MedicationOrder = y lệnh thuốc (đơn thuốc) cho từng Individual
+ * ✅ FIX: Map fields to DB lowercase columns so we DON'T change production DB
  */
 model MedicationOrder {
-  id             String                @id @default(cuid())
-  individualId   String // link sang Individual qua id (string)
-  medicationName String
-  form           String? // tablet, capsule, solution...
-  doseValue      Float
-  doseUnit       String // mg, ml, tablet...
-  route          String // PO, IM, IV, SQ...
-  type           MedicationType
-  frequencyText  String? // “BID”, “QHS”…
-  timesOfDay     String[]              @default([])
-  startDate      DateTime
-  endDate        DateTime?
-  status         MedicationOrderStatus @default(ACTIVE)
+  id String @id @default(cuid())
 
-  prescriberName String?
-  pharmacyName   String?
-  indications    String? // lý do dùng thuốc
-  allergyFlag    Boolean @default(false)
+  individualId   String                @map("individualid")
+  medicationName String                @map("medicationname")
+  form           String?               @map("form")
+  doseValue      Float                 @map("dosevalue")
+  doseUnit       String                @map("doseunit")
+  route          String                @map("route")
+  type           MedicationType        @map("type")
+  frequencyText  String?               @map("frequencytext")
+  timesOfDay     String[]              @default([]) @map("timesofday")
+  startDate      DateTime              @map("startdate")
+  endDate        DateTime?             @map("enddate")
+  status         MedicationOrderStatus @default(ACTIVE) @map("status")
 
-  // Relations nội bộ Medication
+  prescriberName String? @map("prescribername")
+  pharmacyName   String? @map("pharmacyname")
+  indications    String? @map("indications")
+  allergyFlag    Boolean @default(false) @map("allergyflag")
+
   administrations MedicationAdministration[]
   inventoryItems  MedicationInventory[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now()) @map("createdat")
+  updatedAt DateTime @updatedAt @map("updatedat")
 
   @@index([individualId, status])
+  @@map("MedicationOrder")
 }
 
 /**
  * MedicationAdministration = mỗi lần cấp thuốc trong MAR
+ * ✅ FIX: map DB columns
  */
 model MedicationAdministration {
-  id      String          @id @default(cuid())
-  orderId String
+  id String @id @default(cuid())
+
+  orderId String          @map("orderid")
   order   MedicationOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
-  individualId      String // lưu thêm để query nhanh
-  scheduledDateTime DateTime
-  actualDateTime    DateTime?
-  status            MedicationAdminStatus
-  reason            String? // reason/refused/missed...
-  vitalsSummary     String? // "BP 120/70, HR 76, BG 145"
-  staffId           String? // id DSP
-  staffName         String? // tên DSP, cache để không phải join
+  individualId      String                @map("individualid")
+  scheduledDateTime DateTime              @map("scheduleddatetime")
+  actualDateTime    DateTime?             @map("actualdatetime")
+  status            MedicationAdminStatus @map("status")
+  reason            String?               @map("reason")
+  vitalsSummary     String?               @map("vitalssummary")
+  staffId           String?               @map("staffid")
+  staffName         String?               @map("staffname")
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now()) @map("createdat")
+  updatedAt DateTime @updatedAt @map("updatedat")
 
   @@index([individualId, scheduledDateTime])
   @@index([orderId, scheduledDateTime])
+  @@map("MedicationAdministration")
 }
 
 /**
  * MedicationInventory = tồn kho thuốc theo từng Individual
+ * ✅ FIX: map DB columns
  */
 model MedicationInventory {
-  id      String           @id @default(cuid())
-  orderId String?
+  id String @id @default(cuid())
+
+  orderId String?          @map("orderid")
   order   MedicationOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
-  individualId    String
-  medicationName  String // cache tên thuốc để xem nhanh
-  isControlled    Boolean   @default(false)
-  currentQuantity Float
-  unit            String // tablet, ml...
-  minThreshold    Float     @default(0)
-  daysRemaining   Int?
-  lastCountDate   DateTime?
+  individualId    String    @map("individualid")
+  medicationName  String    @map("medicationname")
+  isControlled    Boolean   @default(false) @map("iscontrolled")
+  currentQuantity Float     @map("currentquantity")
+  unit            String    @map("unit")
+  minThreshold    Float     @default(0) @map("minthreshold")
+  daysRemaining   Int?      @map("daysremaining")
+  lastCountDate   DateTime? @map("lastcountdate")
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now()) @map("createdat")
+  updatedAt DateTime @updatedAt @map("updatedat")
 
   @@index([individualId])
   @@index([individualId, isControlled])
+  @@map("MedicationInventory")
 }
 
 /**
  * MedicationIncident = lỗi thuốc, Missed dose, Medication error...
+ * ✅ FIX: map DB columns
  */
 model MedicationIncident {
-  id             String                     @id @default(cuid())
-  individualId   String
-  individualName String
-  date           DateTime
-  medicationName String?
-  type           String // "Missed Dose", "Medication Error", ...
-  severity       MedicationIncidentSeverity
-  status         MedicationIncidentStatus   @default(OPEN)
-  notes          String?
+  id String @id @default(cuid())
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  individualId   String                     @map("individualid")
+  individualName String                     @map("individualname")
+  date           DateTime                   @map("date")
+  medicationName String?                    @map("medicationname")
+  type           String                     @map("type")
+  severity       MedicationIncidentSeverity @map("severity")
+  status         MedicationIncidentStatus   @default(OPEN) @map("status")
+  notes          String?                    @map("notes")
+
+  createdAt DateTime @default(now()) @map("createdat")
+  updatedAt DateTime @updatedAt @map("updatedat")
 
   @@index([individualId, date])
   @@index([severity])
   @@index([status])
+  @@map("MedicationIncident")
 }
 
 model MobileLoginOtp {
@@ -912,9 +926,9 @@ model OfficeWeeklyApproval {
   weekStart DateTime
   weekEnd   DateTime
 
-  computedMinutes Int @default(0)
+  computedMinutes Int  @default(0)
   adjustedMinutes Int?
-  finalMinutes    Int @default(0)
+  finalMinutes    Int  @default(0)
 
   // ✅ NEW – per-day adjustment map
   // IMPORTANT: Canonical table is "OfficeWeeklyApproval" (camelCase)
@@ -937,7 +951,6 @@ model OfficeWeeklyApproval {
   @@unique([staffId, weekStart, weekEnd], name: "staffId_weekStart_weekEnd")
   @@index([weekStart, weekEnd])
   @@index([status])
-
   // ✅ FIX: Point Prisma to the correct table
   @@map("OfficeWeeklyApproval")
 }
@@ -953,8 +966,8 @@ model PayrollRate {
   employeeId String @unique
 
   rate         Float?
-  trainingRate Float? // default 10 if null
-  mileageRate  Float? // default 0.30 if null
+  trainingRate Float?
+  mileageRate  Float?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -965,8 +978,8 @@ model PayrollRate {
 model PayrollRun {
   id String @id @default(cuid())
 
-  periodFrom String // YYYY-MM-DD
-  periodTo   String // YYYY-MM-DD
+  periodFrom  String
+  periodTo    String
   generatedAt DateTime @default(now())
 
   totalsTotalHours   Float @default(0)
@@ -987,13 +1000,13 @@ model PayrollRow {
   runId String
   run   PayrollRun @relation(fields: [runId], references: [id], onDelete: Cascade)
 
-  staffId   String // Employee.employeeId (BAC-E-...)
+  staffId   String
   staffName String
-  staffType String // "DSP" | "OFFICE"
+  staffType String
 
   employeeSSN String?
 
-  rate        Float
+  rate         Float
   trainingRate Float?
   mileageRate  Float?
 
@@ -1009,4 +1022,93 @@ model PayrollRow {
   @@index([runId])
   @@index([staffId])
   @@index([staffType])
+}
+
+// =====================================================
+//  HEALTH & INCIDENT (Mobile Form)
+// =====================================================
+
+enum HealthIncidentReportStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  ASSIGNED
+  INVESTIGATED
+  CLOSED
+
+  @@map("health_incident_report_status")
+}
+
+model HealthIncidentReport {
+  id String @id @default(cuid())
+
+  // Optional link to shift
+  shiftId String?
+  shift   ScheduleShift? @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+
+  // DSP who submitted
+  staffId    String
+  staff      Employee @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  staffName  String?
+  staffEmail String?
+
+  // Optional client info snapshot
+  individualId   String?
+  individual     Individual? @relation(fields: [individualId], references: [id], onDelete: SetNull)
+  individualName String?
+
+  // service date (local day)
+  date DateTime
+
+  status      HealthIncidentReportStatus @default(SUBMITTED)
+  submittedAt DateTime?
+
+  // full Word-form payload
+  payload Json
+
+  // Supervisor section
+  supervisorName         String?
+  supervisorDecision     String?
+  supervisorActionsTaken String?
+  reviewedAt             DateTime?
+
+  // ✅ NEW: CI Assignment (Supervisor assigns Certified Investigator)
+  ciName  String?
+  ciEmail String?
+  ciPhone String?
+
+  ciAssignedAt       DateTime?
+  ciAssignedByUserId String?
+  ciAssignedByName   String?
+
+  // ✅ NEW: CI Investigation section
+  investigationFindings String?
+  rootCause             String?
+  witnessNotes          String?
+  correctiveActions     String?
+  recommendation        String?
+
+  investigatedAt        DateTime?
+  investigatedByStaffId String?
+  investigatedByName    String?
+
+  // ✅ NEW: direct-download report paths (saved on server filesystem)
+  staffReportDocPath String?
+  staffReportPdfPath String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([date])
+  @@index([status])
+  @@index([staffId, date])
+  @@index([individualId, date])
+
+  // ✅ NEW: helpful indexes for report filtering
+  @@index([shiftId])
+  @@index([ciAssignedAt])
+  @@index([investigatedAt])
+
+  // ✅ map đúng table DB trong Supabase (case-sensitive)
+  @@map("HealthIncidentReport")
 }

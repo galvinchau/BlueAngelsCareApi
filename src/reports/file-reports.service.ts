@@ -165,9 +165,6 @@ export class FileReportsService {
   } {
     const p = payload || {};
 
-    // Mobile payload keys we saw:
-    // - dspSignature: "data:image/png;base64,..."
-    // - individualSignature: "data:image/png;base64,..."
     const staff =
       p.dspSignature ||
       p.staffSignature ||
@@ -208,7 +205,6 @@ export class FileReportsService {
       return ctXml;
     }
 
-    // Add before closing </Types>
     const insert = '<Default Extension="png" ContentType="image/png"/>';
     if (ctXml.includes('</Types>')) {
       return ctXml.replace('</Types>', `${insert}</Types>`);
@@ -224,8 +220,6 @@ export class FileReportsService {
     return max + 1;
   }
 
-  // Fixed display size (px -> EMU)
-  // 1 px @96dpi = 9525 EMU
   private pxToEmu(px: number): number {
     return Math.round(px * 9525);
   }
@@ -236,8 +230,6 @@ export class FileReportsService {
     cxEmu: number,
     cyEmu: number,
   ): string {
-    // Minimal WordprocessingML inline image
-    // Note: keep it in one run context replacement
     const docPrId = Math.floor(Math.random() * 100000) + 1;
     const picId = Math.floor(Math.random() * 100000) + 1;
 
@@ -276,12 +268,6 @@ export class FileReportsService {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  /**
-   * Compute rels path for any word xml part:
-   * - word/document.xml -> word/_rels/document.xml.rels
-   * - word/header1.xml  -> word/_rels/header1.xml.rels
-   * - word/drawings/drawing1.xml -> word/drawings/_rels/drawing1.xml.rels
-   */
   private relsPathForXml(xmlPath: string): string {
     const lastSlash = xmlPath.lastIndexOf('/');
     const dir = lastSlash >= 0 ? xmlPath.slice(0, lastSlash) : 'word';
@@ -292,18 +278,12 @@ export class FileReportsService {
   private ensureRelsXml(zip: any, relsPath: string): string {
     const f = zip.file(relsPath);
     if (f) return f.asText();
-    // Minimal Relationships part
     return (
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'
     );
   }
 
-  /**
-   * Replace split token stored by Word as:
-   *   <w:t>{%</w:t> ... <w:t>NAME</w:t> ... <w:t>%}</w:t>
-   * Allow arbitrary tags between pieces (proofErr, runs, etc).
-   */
   private replaceSplitToken(
     xml: string,
     name: string,
@@ -317,14 +297,12 @@ export class FileReportsService {
     return xml.replace(re, replacement);
   }
 
-  // ✅ NEW: Replace split mustache token "{{Name}}" even if Word splits across runs.
   private replaceSplitMustacheToken(
     xml: string,
     name: string,
     replacement: string,
   ): string {
     const n = this.escapeRegExp(name);
-    // Matches: <w:t>{{</w:t> ... <w:t>Name</w:t> ... <w:t>}}</w:t>
     const re = new RegExp(
       `<w:t[^>]*>\\{\\{<\\/w:t>[\\s\\S]*?<w:t[^>]*>${n}<\\/w:t>[\\s\\S]*?<w:t[^>]*>\\}\\}<\\/w:t>`,
       'g',
@@ -332,7 +310,6 @@ export class FileReportsService {
     return xml.replace(re, replacement);
   }
 
-  // ✅ NEW: Patch {{OverReason}} / {{ShortReason}} across ALL xml parts (document, headers, drawings, textboxes).
   private patchMustacheTokensIntoDocx(
     docxBuf: Buffer,
     replacements: Record<string, string>,
@@ -356,12 +333,10 @@ export class FileReportsService {
 
         const before = xml;
 
-        // contiguous token
         if (xml.includes(token)) {
           xml = xml.split(token).join(value);
         }
 
-        // split token across runs
         xml = this.replaceSplitMustacheToken(xml, key, value);
 
         if (xml !== before) changed = true;
@@ -375,13 +350,6 @@ export class FileReportsService {
     return zip.generate({ type: 'nodebuffer' }) as Buffer;
   }
 
-  /**
-   * Inject signature PNG images into DOCX by replacing placeholders:
-   * - {%StaffSignatureImage%} or split as "{%" + "StaffSignatureImage" + "%}"
-   * - {%IndividualSignatureImage%} or split similarly
-   *
-   * This avoids dumping base64 text into the document.
-   */
   private injectSignatureImagesIntoDocx(
     docxBuf: Buffer,
     staffSigDataUrl: string,
@@ -390,7 +358,6 @@ export class FileReportsService {
     const staffPng = this.dataUrlToPngBuffer(staffSigDataUrl);
     const indPng = this.dataUrlToPngBuffer(individualSigDataUrl);
 
-    // NOTE: avoid TS "PizZip as a type" by not typing it
     const zip: any = new PizZip(docxBuf);
 
     const ctFile = zip.file('[Content_Types].xml');
@@ -400,12 +367,11 @@ export class FileReportsService {
       zip.file('[Content_Types].xml', ctXml);
     }
 
-    // Compute sizes
     const cx = this.pxToEmu(220);
     const cy = this.pxToEmu(70);
 
     const replacements: Array<{
-      name: string; // token name without wrappers
+      name: string;
       png: Buffer | null;
       filename: string;
     }> = [
@@ -417,12 +383,10 @@ export class FileReportsService {
       },
     ];
 
-    // Scan ALL word/*.xml parts (Word may store content in various xmls)
     const xmlNames = Object.keys(zip.files || {}).filter(
       (n) => n.startsWith('word/') && n.endsWith('.xml') && !!zip.file(n),
     );
 
-    // Add images (once) into /word/media/
     if (staffPng) zip.file(`word/media/sig_staff.png`, staffPng);
     if (indPng) zip.file(`word/media/sig_individual.png`, indPng);
 
@@ -440,7 +404,6 @@ export class FileReportsService {
       for (const r of replacements) {
         const fullToken = `{%${r.name}%}`;
 
-        // If no png, remove token (both contiguous and split) to avoid printing tags
         if (!r.png) {
           const before = xml;
           xml = xml.replaceAll(fullToken, '');
@@ -449,7 +412,6 @@ export class FileReportsService {
           continue;
         }
 
-        // Quick gate: if xml doesn't contain any of the pieces, skip
         if (
           !xml.includes(r.name) &&
           !xml.includes('{%') &&
@@ -458,13 +420,11 @@ export class FileReportsService {
           continue;
         }
 
-        // Add relationship
         const next = this.nextRelId(relsXml);
         const rId = `rId${next}`;
         const relTag = `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${r.filename}"/>`;
 
         if (!relsXml.includes('</Relationships>')) {
-          // malformed rels: don't break doc, just remove tokens so they don't show
           const before = xml;
           xml = xml.replaceAll(fullToken, '');
           xml = this.replaceSplitToken(xml, r.name, '');
@@ -472,30 +432,24 @@ export class FileReportsService {
           continue;
         }
 
-        // Ensure we don't add duplicate relationship repeatedly if token not present
         const tokenPresent =
           xml.includes(fullToken) ||
           (xml.includes(r.name) && xml.includes('{%') && xml.includes('%}'));
 
         if (!tokenPresent) continue;
 
-        // Append relationship
         relsXml = relsXml.replace(
           '</Relationships>',
           `${relTag}</Relationships>`,
         );
         relsChanged = true;
 
-        // Build drawing xml and replace tokens
         const drawing = this.buildDrawingXml(rId, r.filename, cx, cy);
         const runXml = `<w:r>${drawing}</w:r>`;
 
         const before = xml;
 
-        // Case 1: contiguous token
         xml = xml.replaceAll(fullToken, runXml);
-
-        // Case 2: split token: "{%" + name + "%}"
         xml = this.replaceSplitToken(xml, r.name, runXml);
 
         if (xml !== before) xmlChanged = true;
@@ -546,7 +500,6 @@ export class FileReportsService {
     const zip = this.safeStr(ind.zip ?? '');
     const addr2 = this.safeStr(ind.address2 ?? '');
 
-    // Address2Line: prefer address2, else City/State/Zip; or combine nicely
     const cityLine = [city, state, zip]
       .filter(Boolean)
       .join(', ')
@@ -559,7 +512,6 @@ export class FileReportsService {
         : addr2
       : cityLine;
 
-    // MA: try Primary payer memberId first; else any payer memberId
     const primary = (ind.payers ?? []).find(
       (p) => String(p.type).toLowerCase() === 'primary',
     );
@@ -569,9 +521,6 @@ export class FileReportsService {
     return { address1, address2Line, ma };
   }
 
-  // -----------------------------
-  // DB autofill: Outcome from ISP & BSP (IspBspForm.formData)
-  // -----------------------------
   private async getOutcomeAutofill(
     individualId?: string | null,
   ): Promise<string> {
@@ -591,9 +540,6 @@ export class FileReportsService {
     return this.safeStr(outcome);
   }
 
-  // -----------------------------
-  // Build template data (AUTO)
-  // -----------------------------
   private async buildTemplateData(dn: any, reportType: ReportType) {
     const dateISO =
       dn.date instanceof Date
@@ -604,22 +550,16 @@ export class FileReportsService {
 
     const payload = dn.payload || {};
 
-    // ✅ DB autofill (Address + MA)
     const auto = await this.getIndividualAutofill(dn.individualId ?? null);
-
-    // ✅ DB autofill (Outcome from ISP/BSP)
     const outcomeAuto = await this.getOutcomeAutofill(dn.individualId ?? null);
 
-    // ✅ Signature dataUrls (for WEB Preview + DOCX injection)
     const sig = this.extractSignatureDataUrls(payload);
 
-    // ✅ Meals
     const meals = payload.meals || payload.Meals || {};
     const breakfast = meals.breakfast || meals.Breakfast || {};
     const lunch = meals.lunch || meals.Lunch || {};
     const dinner = meals.dinner || meals.Dinner || {};
 
-    // ✅ Service note text
     const todayPlan =
       payload.todayPlan || payload.todaysPlan || payload.plan || '';
     const whatWeWorkedOn =
@@ -633,7 +573,6 @@ export class FileReportsService {
       payload.prefOpportunity ||
       '';
 
-    // legacy objects
     const notes = payload.notes || payload.note || payload.progressNotes || {};
     const planObj =
       typeof payload.plan === 'object' && payload.plan ? payload.plan : {};
@@ -660,7 +599,6 @@ export class FileReportsService {
       notes.prefOpportunities ??
       '';
 
-    // ✅ Compute totals if payload does NOT provide them
     const schedStartStr = this.safeStr(
       dn.scheduleStart || payload.scheduleStart || '',
     );
@@ -734,11 +672,8 @@ export class FileReportsService {
         ? this.formatHours2(actualMinutes - plannedMinutes)
         : '');
 
-    // ✅ Mileage: template needs {{Mileage}}
     const mileage = dn.mileage ?? payload.mileage ?? payload.totalMileage ?? '';
 
-    // ✅ IMPORTANT FIX:
-    // Address MUST prefer DB autofill first (avoid payload accidentally storing company address)
     const address1DbFirst =
       auto.address1 ||
       payload.patientAddress1 ||
@@ -752,16 +687,13 @@ export class FileReportsService {
       payload.individualAddress2 ||
       '';
 
-    // ✅ MA prefer payload, fallback DB
     const ma = this.safeStr(
       payload.patientMA || payload.ma || payload.individualMa || auto.ma || '',
     );
 
-    // ✅ Keep old "Signed" markers (not used for image, but keep for compatibility)
     const staffSigned = sig.staffSigDataUrl ? 'Signed' : '';
     const individualSigned = sig.individualSigDataUrl ? 'Signed' : '';
 
-    // keep for future branching without breaking API
     const _rt = reportType;
 
     return {
@@ -778,7 +710,6 @@ export class FileReportsService {
       StartTime: this.safeStr(visitStartStr),
       EndTime: this.safeStr(visitEndStr),
 
-      // ✅ totals
       TotalH: this.safeStr(totalH),
       BillableUnits: this.safeStr(billableUnits),
       LostMinutes: this.safeStr(lostMinutes),
@@ -786,13 +717,12 @@ export class FileReportsService {
       UnderHours: this.safeStr(underHours),
       OverHours: this.safeStr(overHours),
 
-      // ✅ Mileage
       Mileage: this.safeStr(mileage),
 
       OverReason: this.safeStr(
         payload.overReason ??
           payload.overReasonText ??
-          payload.varianceReason ?? // ✅ support mobile field
+          payload.varianceReason ??
           '',
       ),
       CancelReason: this.safeStr(dn.cancelReason ?? payload.cancelReason ?? ''),
@@ -800,7 +730,6 @@ export class FileReportsService {
         payload.shortReason ?? payload.varianceReason ?? '',
       ),
 
-      // ✅ Outcome (payload first, fallback to ISP/BSP)
       OutcomeText: this.safeStr(
         payload.outcomeText ||
           payload.outcome ||
@@ -809,11 +738,9 @@ export class FileReportsService {
           '',
       ),
 
-      // ✅ Address from DB first (stable)
       PatientAddress1: this.safeStr(address1DbFirst),
       PatientAddress2: this.safeStr(address2DbFirst),
 
-      // ✅ Page 2
       SupportsDuringService: this.safeStr(
         typeof todayPlan === 'string' ? todayPlan : supportsDuringServiceLegacy,
       ),
@@ -828,7 +755,6 @@ export class FileReportsService {
           : prefOpportunitiesLegacy,
       ),
 
-      // ✅ Meals
       BreakfastTime: this.safeStr(
         breakfast.time ||
           breakfast.Time ||
@@ -883,22 +809,14 @@ export class FileReportsService {
           '',
       ),
 
-      // Old compatibility markers
       STAFF_SIGNATURE: this.safeStr(staffSigned),
       INDIVIDUAL_SIGNATURE: this.safeStr(individualSigned),
 
-      // ✅ NEW: used by WEB Preview <img/> and DOCX injection
       StaffSignatureDataUrl: this.safeStr(sig.staffSigDataUrl),
       IndividualSignatureDataUrl: this.safeStr(sig.individualSigDataUrl),
     };
   }
 
-  /**
-   * ✅ PREVIEW DATA
-   * MUST match DOC/PDF autofill exactly (Outcome from ISP/BSP included)
-   *
-   * GET /reports/daily-notes/:id/preview?type=staff|individual
-   */
   async getPreviewData(dailyNoteId: string, reportType: ReportType = 'staff') {
     const dn = await this.prisma.dailyNote.findUnique({
       where: { id: dailyNoteId },
@@ -919,7 +837,6 @@ export class FileReportsService {
       delimiters: { start: '{{', end: '}}' },
     });
 
-    // DOC/PDF generation uses same mapping as preview (staff keys)
     const data: any = await this.buildTemplateData(dn, 'staff');
 
     try {
@@ -930,16 +847,13 @@ export class FileReportsService {
       throw new Error(`Docx template render failed: ${msg}`);
     }
 
-    // 1) Generate base docx
     let out = doc.getZip().generate({ type: 'nodebuffer' }) as Buffer;
 
-    // ✅ NEW: patch mustache tokens across ALL xml parts (textboxes/shapes)
     out = this.patchMustacheTokensIntoDocx(out, {
       OverReason: this.safeStr(data?.OverReason || ''),
       ShortReason: this.safeStr(data?.ShortReason || ''),
     });
 
-    // 2) Inject signatures into placeholders inside docx (supports split tokens)
     out = this.injectSignatureImagesIntoDocx(
       out,
       this.safeStr(data?.StaffSignatureDataUrl || ''),
@@ -1236,5 +1150,221 @@ export class FileReportsService {
     });
 
     return absPdfPath;
+  }
+
+  // ============================================================
+  // ✅ NEW: HEALTH INCIDENT PDF (BUFFER) FOR CI EMAIL ATTACHMENT
+  // ============================================================
+
+  private toLocalTimeHHmm(d?: Date | null): string {
+    if (!d) return '';
+    return (
+      DateTime.fromJSDate(d, { zone: 'utc' }).setZone(TZ).toFormat('HH:mm') ?? ''
+    );
+  }
+
+  private safeJsonString(v: any): string {
+    if (v === null || v === undefined) return '';
+    try {
+      if (typeof v === 'string') return v;
+      return JSON.stringify(v, null, 2);
+    } catch {
+      return String(v);
+    }
+  }
+
+  /**
+   * Build a readable Health & Incident PDF for CI (no web needed).
+   * Returns PDF bytes (Buffer).
+   *
+   * IMPORTANT: This is intentionally "fallback style" (PDF-lib) to be safe in production.
+   * No external templates. No CloudConvert dependency.
+   */
+  async buildHealthIncidentPdfBuffer(reportId: string): Promise<{
+    filename: string;
+    buffer: Buffer;
+  }> {
+    const rpt: any = await this.prisma.healthIncidentReport.findUnique({
+      where: { id: reportId },
+      select: {
+        id: true,
+        date: true,
+        createdAt: true as any,
+        status: true,
+        submittedAt: true,
+
+        staffId: true,
+        staffName: true,
+        staffEmail: true,
+
+        individualId: true,
+        individualName: true,
+
+        payload: true,
+
+        shiftId: true,
+        shift: {
+          select: {
+            id: true,
+            scheduleDate: true,
+            plannedStart: true,
+            plannedEnd: true,
+            service: { select: { serviceCode: true, serviceName: true } },
+          },
+        },
+
+        supervisorName: true,
+        supervisorDecision: true,
+        supervisorActionsTaken: true,
+        reviewedAt: true,
+
+        ciName: true,
+        ciEmail: true,
+        ciPhone: true,
+        ciAssignedAt: true,
+        ciAssignedByName: true,
+
+        investigationFindings: true,
+        rootCause: true,
+        witnessNotes: true,
+        correctiveActions: true,
+        recommendation: true,
+        investigatedAt: true,
+        investigatedByName: true,
+      },
+    });
+
+    if (!rpt) throw new Error('HealthIncidentReport not found');
+
+    const dateLocal = rpt.date ? this.localDateISO(rpt.date) : '';
+    const shiftStart = rpt.shift?.plannedStart
+      ? this.toLocalTimeHHmm(rpt.shift?.plannedStart)
+      : '';
+    const shiftEnd = rpt.shift?.plannedEnd
+      ? this.toLocalTimeHHmm(rpt.shift?.plannedEnd)
+      : '';
+
+    // Try to extract incident type from payload (best-effort)
+    let incidentType = '';
+    try {
+      const p = typeof rpt.payload === 'string' ? JSON.parse(rpt.payload) : rpt.payload;
+      incidentType =
+        (p?.incidentType ||
+          p?.incident_type ||
+          p?.typeOfIncident ||
+          p?.type_of_incident ||
+          p?.incidentCategory ||
+          p?.incident_category ||
+          p?.incident?.incidentType ||
+          p?.incident?.type ||
+          p?.healthIncident?.incidentType ||
+          p?.report?.incidentType ||
+          '')?.toString?.() ?? '';
+      incidentType = String(incidentType).trim();
+    } catch {
+      // ignore
+    }
+
+    const pdfDoc = await PDFDocument.create();
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+    const page = pdfDoc.addPage([612, 792]);
+    const { width } = page.getSize();
+
+    let y = 760;
+    const marginX = 40;
+
+    const drawLine = (text: string, bold = false, size = 11) => {
+      const t = text || '';
+      page.drawText(t.slice(0, 3000), {
+        x: marginX,
+        y,
+        size,
+        font: bold ? fontBold : font,
+      });
+      y -= size + 6;
+    };
+
+    const drawWrapped = (label: string, value: string) => {
+      const maxWidth = width - marginX * 2;
+      const labelText = label ? `${label}: ` : '';
+      const full = `${labelText}${value || ''}`.trim();
+
+      const words = full.split(/\s+/);
+      let line = '';
+      for (const w of words) {
+        const test = line ? `${line} ${w}` : w;
+        const wWidth = font.widthOfTextAtSize(test, 11);
+        if (wWidth > maxWidth) {
+          drawLine(line);
+          line = w;
+          if (y < 80) break;
+        } else {
+          line = test;
+        }
+      }
+      if (line) drawLine(line);
+    };
+
+    // Header
+    drawLine('BLUE ANGELS CARE', true, 16);
+    drawLine('HEALTH & INCIDENT REPORT (CI COPY)', true, 13);
+    drawLine(`Report ID: ${rpt.id}`, false, 10);
+    drawLine(''); // spacer
+
+    // Core info
+    drawWrapped('Date', dateLocal);
+    drawWrapped('Status', String(rpt.status || ''));
+    if (incidentType) drawWrapped('Incident Type', incidentType);
+
+    drawWrapped('Individual', String(rpt.individualName || ''));
+    drawWrapped('Reported by (DSP)', String(rpt.staffName || ''));
+    drawWrapped('DSP Email', String(rpt.staffEmail || ''));
+
+    const svc = rpt.shift?.service?.serviceName || rpt.shift?.service?.serviceCode || '';
+    if (svc) drawWrapped('Service', String(svc));
+    if (shiftStart || shiftEnd) drawWrapped('Shift', `${shiftStart || ''} - ${shiftEnd || ''}`.trim());
+
+    drawLine('');
+    drawLine('SUPERVISOR REVIEW', true, 12);
+    drawWrapped('Supervisor Name', String(rpt.supervisorName || ''));
+    drawWrapped('Decision', String(rpt.supervisorDecision || ''));
+    drawWrapped('Actions Taken', String(rpt.supervisorActionsTaken || ''));
+
+    drawLine('');
+    drawLine('CI ASSIGNMENT', true, 12);
+    drawWrapped('CI Name', String(rpt.ciName || ''));
+    drawWrapped('CI Email', String(rpt.ciEmail || ''));
+    drawWrapped('CI Phone', String(rpt.ciPhone || ''));
+    drawWrapped('Assigned By', String(rpt.ciAssignedByName || ''));
+
+    // Payload snapshot (for completeness)
+    drawLine('');
+    drawLine('REPORT DETAILS (PAYLOAD SNAPSHOT)', true, 12);
+
+    const payloadText = this.safeJsonString(rpt.payload);
+    const payloadLines = payloadText.split('\n');
+
+    for (const ln of payloadLines) {
+      if (y < 80) break;
+      drawLine(ln.slice(0, 1800), false, 9);
+    }
+
+    // Footer note
+    if (y > 60) {
+      drawLine('');
+      drawLine('This document is confidential and intended for authorized use only.', false, 9);
+    }
+
+    const bytes = await pdfDoc.save();
+    const buffer = Buffer.from(bytes);
+
+    const safeInd = String(rpt.individualName || 'Individual')
+      .replace(/[^a-zA-Z0-9]+/g, '_')
+      .slice(0, 40);
+
+    const filename = `HealthIncidentReport_${dateLocal || 'date'}_${safeInd}.pdf`;
+    return { filename, buffer };
   }
 }

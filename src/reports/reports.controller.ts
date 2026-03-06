@@ -7,12 +7,18 @@ import {
   Res,
   NotFoundException,
   BadRequestException,
+  Patch,
+  Body,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { ReportsService, DailyNotesFilter } from './reports.service';
+import {
+  ReportsService,
+  DailyNotesFilter,
+  HealthIncidentFilter,
+} from './reports.service';
 import { FileReportsService } from './file-reports.service';
 
 type DownloadType =
@@ -28,6 +34,10 @@ export class ReportsController {
     private readonly fileReportsService: FileReportsService,
   ) {}
 
+  // =========================
+  // DAILY NOTES (existing)
+  // =========================
+
   @Get('daily-notes')
   async getDailyNotes(
     @Query('from') from?: string,
@@ -40,9 +50,6 @@ export class ReportsController {
     return { items: notes };
   }
 
-  /**
-   * GET /reports/daily-notes/:id
-   */
   @Get('daily-notes/:id')
   async getDailyNoteDetail(@Param('id') id: string) {
     if (!id || String(id).trim() === '') {
@@ -54,10 +61,6 @@ export class ReportsController {
     return dn;
   }
 
-  /**
-   * ✅ PREVIEW DATA (match DOC/PDF template mapping)
-   * GET /reports/daily-notes/:id/preview
-   */
   @Get('daily-notes/:id/preview')
   async getDailyNotePreview(@Param('id') id: string) {
     if (!id || String(id).trim() === '') {
@@ -70,7 +73,6 @@ export class ReportsController {
     } catch (e: any) {
       const msg = e?.message ?? String(e);
 
-      // Map common errors to proper HTTP codes
       if (msg.toLowerCase().includes('not found')) {
         throw new NotFoundException('DailyNote not found');
       }
@@ -82,15 +84,10 @@ export class ReportsController {
         throw new BadRequestException(msg);
       }
 
-      // Default: bad request (so web shows readable error)
       throw new BadRequestException(msg);
     }
   }
 
-  /**
-   * Direct download DOC/PDF (no Google Drive)
-   * GET /reports/daily-notes/:id/download/:type
-   */
   @Get('daily-notes/:id/download/:type')
   async downloadDailyNoteReport(
     @Param('id') id: string,
@@ -114,32 +111,27 @@ export class ReportsController {
     const forceRegen =
       regen === '1' || regen === 'true' || regen === 'yes' ? true : false;
 
-    // normalize & security root
     const uploadsRoot = path.resolve(process.cwd(), 'uploads');
 
     const isWindowsAbsPath = (p: string) => /^[a-zA-Z]:[\\/]/.test(p);
 
     const isSafeUploadsPath = (p: string) => {
       if (!p) return false;
-      // reject obvious Windows path on Linux/Render (or mixed env)
       if (isWindowsAbsPath(p)) return false;
 
       const abs = path.resolve(p);
       return abs === uploadsRoot || abs.startsWith(uploadsRoot + path.sep);
     };
 
-    // pick path + maybe auto-generate
     let filePath: string | null = null;
     let contentType = 'application/octet-stream';
     let ext = 'bin';
 
-    // DOCX: generate if missing OR invalid OR ?regen=1
     if (type === 'staff-doc') {
       contentType =
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       ext = 'docx';
 
-      // If DB path exists but is NOT safe for this server => treat as missing
       const existing = dn.staffReportDocPath ?? null;
       const usable = existing && isSafeUploadsPath(existing) ? existing : null;
 
@@ -163,10 +155,6 @@ export class ReportsController {
       }
     }
 
-    /**
-     * PDF: ALWAYS regenerate
-     * (On Render, if LibreOffice missing => fallback PDF)
-     */
     if (type === 'staff-pdf') {
       contentType = 'application/pdf';
       ext = 'pdf';
@@ -183,7 +171,6 @@ export class ReportsController {
       throw new NotFoundException('Report file path not available yet');
     }
 
-    // final security check (must be under uploads)
     const absPath = path.resolve(filePath);
 
     if (
@@ -194,7 +181,6 @@ export class ReportsController {
     }
 
     if (!fs.existsSync(absPath)) {
-      // if file missing on disk, try regenerate for doc types once
       if (type === 'staff-doc') {
         const regenerated = await this.fileReportsService.generateStaffDocx(id);
         const regenAbs = path.resolve(regenerated);
@@ -222,7 +208,6 @@ export class ReportsController {
       }
     }
 
-    // build filename: YYYY-MM-DD - Individual - Service - DSP.ext
     const date = dn.date.toISOString().slice(0, 10);
     const individual = sanitizeName(dn.individualName || 'Individual');
     const service = sanitizeName(dn.serviceName || 'Service');
@@ -238,6 +223,114 @@ export class ReportsController {
 
     const stream = fs.createReadStream(path.resolve(filePath));
     stream.pipe(res);
+  }
+
+  // =========================
+  // HEALTH & INCIDENT
+  // =========================
+
+  @Get('health-incident')
+  async getHealthIncidentReports(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('staffId') staffId?: string,
+    @Query('individualId') individualId?: string,
+    @Query('status') status?: string,
+  ) {
+    const filter: HealthIncidentFilter = {
+      from,
+      to,
+      staffId,
+      individualId,
+      status,
+    };
+    const items = await this.reportsService.getHealthIncidentReports(filter);
+    return { items };
+  }
+
+  /**
+   * Optional lightweight endpoint for unread summary.
+   * Current meaning of "new" = status SUBMITTED.
+   */
+  @Get('health-incident/unread/summary')
+  async getHealthIncidentUnreadSummary() {
+    return this.reportsService.getHealthIncidentUnreadSummary();
+  }
+
+  @Get('health-incident/:id')
+  async getHealthIncidentDetail(@Param('id') id: string) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+    const rpt = await this.reportsService.getHealthIncidentReportDetail(id);
+    if (!rpt) throw new NotFoundException('HealthIncidentReport not found');
+    return rpt;
+  }
+
+  @Patch('health-incident/:id/review')
+  async saveSupervisorReview(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      status?: string;
+      supervisorName?: string;
+      supervisorDecision?: string;
+      supervisorActionsTaken?: string;
+    },
+  ) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    const updated = await this.reportsService.saveHealthIncidentReview(
+      id,
+      body ?? {},
+    );
+    if (!updated) throw new NotFoundException('HealthIncidentReport not found');
+    return updated;
+  }
+
+  @Patch('health-incident/:id/close')
+  async closeHealthIncident(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      supervisorName?: string;
+      supervisorDecision?: string;
+      supervisorActionsTaken?: string;
+    },
+  ) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    const updated = await this.reportsService.closeHealthIncidentReport(
+      id,
+      body ?? {},
+    );
+    if (!updated) throw new NotFoundException('HealthIncidentReport not found');
+    return updated;
+  }
+
+  @Patch('health-incident/:id/assign')
+  async assignCI(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      ciName?: string;
+      ciEmail?: string;
+      ciPhone?: string;
+      ciAssignedByUserId?: string;
+      ciAssignedByName?: string;
+    },
+  ) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    const updated = await this.reportsService.assignCI(id, body ?? {});
+    if (!updated) throw new NotFoundException('HealthIncidentReport not found');
+    return updated;
   }
 }
 
