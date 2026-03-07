@@ -548,7 +548,7 @@ export class MobileService {
       );
     }
 
-    const serviceCode = String(input.serviceCode || 'COMP')
+    const serviceCode = String(input.serviceCode || 'W1726')
       .trim()
       .toUpperCase();
 

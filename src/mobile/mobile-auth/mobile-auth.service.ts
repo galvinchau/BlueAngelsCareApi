@@ -23,6 +23,20 @@ const OTP_EXPIRES_MINUTES = 10;
 // ✅ 90 days remember-login
 const REFRESH_TOKEN_DAYS = 90;
 
+/**
+ * Apple Review demo login
+ * - Only affects this specific review email
+ * - Does NOT change behavior for any real user
+ * - You can later move these to env vars if you want
+ */
+const REVIEW_DEMO_EMAIL = (
+  process.env.MOBILE_REVIEW_DEMO_EMAIL || 'bac.hms.reports@gmail.com'
+)
+  .trim()
+  .toLowerCase();
+
+const REVIEW_DEMO_OTP = (process.env.MOBILE_REVIEW_DEMO_OTP || '1234').trim();
+
 function addDays(date: Date, days: number) {
   return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 }
@@ -51,6 +65,10 @@ export class MobileAuthService {
     return Math.floor(1000 + Math.random() * 9000).toString();
   }
 
+  private isReviewDemoEmail(email: string): boolean {
+    return String(email || '').trim().toLowerCase() === REVIEW_DEMO_EMAIL;
+  }
+
   async requestOtp(email: string) {
     const trimmedEmail = String(email || '')
       .trim()
@@ -67,7 +85,9 @@ export class MobileAuthService {
       );
     }
 
-    const code = this.generateOtpCode();
+    const isReviewDemo = this.isReviewDemoEmail(trimmedEmail);
+    const code = isReviewDemo ? REVIEW_DEMO_OTP : this.generateOtpCode();
+
     const now = new Date();
     const expiresAt = new Date(now.getTime() + OTP_EXPIRES_MINUTES * 60 * 1000);
 
@@ -96,6 +116,15 @@ export class MobileAuthService {
       `<p style="font-size:28px;font-weight:bold;letter-spacing:4px;">${code}</p>` +
       `<p>This code will expire in ${OTP_EXPIRES_MINUTES} minutes.</p>` +
       `<p>If you did not request this code, please contact the Blue Angels Care office.</p>`;
+
+    // ✅ Apple Review demo account:
+    // keep normal OTP flow in app, but do NOT send email
+    if (isReviewDemo) {
+      return {
+        ok: true,
+        demo: true,
+      };
+    }
 
     try {
       await this.transporter.sendMail({
