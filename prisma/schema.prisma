@@ -200,10 +200,10 @@ model Employee {
   updatedAt DateTime @updatedAt
 
   // Relations mới
-  templateDefaultShifts MasterTemplateShift[]  @relation("TemplateDefaultDSP")
-  plannedShifts         ScheduleShift[]        @relation("PlannedDSP")
-  actualShifts          ScheduleShift[]        @relation("ActualDSP")
-  visits                Visit[]                @relation("VisitDSP")
+  templateDefaultShifts MasterTemplateShift[] @relation("TemplateDefaultDSP")
+  plannedShifts         ScheduleShift[]       @relation("PlannedDSP")
+  actualShifts          ScheduleShift[]       @relation("ActualDSP")
+  visits                Visit[]               @relation("VisitDSP")
   healthIncidentReports HealthIncidentReport[]
 
   // Supervisors cho Admin Users
@@ -219,7 +219,7 @@ model Employee {
  * Payer: các đối tượng thanh toán: Primary / Secondary
  */
 model Payer {
-  id          String  @id @default(cuid())
+  id          String @id @default(cuid())
   type        String // "Primary" | "Secondary"
   name        String
   plan        String?
@@ -240,7 +240,7 @@ model Payer {
  * Medications
  */
 model Medication {
-  id       String  @id @default(cuid())
+  id       String @id @default(cuid())
   name     String
   dose     String?
   schedule String?
@@ -253,7 +253,7 @@ model Medication {
  * Diagnoses (ICD)
  */
 model Diagnosis {
-  id          String  @id @default(cuid())
+  id          String @id @default(cuid())
   icd         String
   description String?
   onset       String? // YYYY-MM-DD
@@ -349,7 +349,7 @@ model MasterScheduleTemplate {
   isActive      Boolean   @default(true)
   notes         String?
 
-  individual    Individual            @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  individual    Individual             @relation(fields: [individualId], references: [id], onDelete: Cascade)
   shifts        MasterTemplateShift[]
   scheduleWeeks ScheduleWeek[] // đầu kia của relation
 
@@ -549,7 +549,7 @@ model DailyNote {
 // =====================================================
 
 model ISPAllocation {
-  id           String  @id @default(cuid())
+  id           String @id @default(cuid())
   individualId String
   serviceId    String
   payerId      String?
@@ -833,14 +833,14 @@ model MedicationIncident {
 }
 
 model MobileLoginOtp {
-  id        String    @id @default(cuid())
+  id        String   @id @default(cuid())
   email     String
   code      String
   staffId   String
   staffName String
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime  @default(now())
+  createdAt DateTime @default(now())
 
   @@index([email])
   @@index([email, code])
@@ -926,9 +926,9 @@ model OfficeWeeklyApproval {
   weekStart DateTime
   weekEnd   DateTime
 
-  computedMinutes Int  @default(0)
+  computedMinutes Int @default(0)
   adjustedMinutes Int?
-  finalMinutes    Int  @default(0)
+  finalMinutes    Int @default(0)
 
   // ✅ NEW – per-day adjustment map
   // IMPORTANT: Canonical table is "OfficeWeeklyApproval" (camelCase)
@@ -1025,7 +1025,7 @@ model PayrollRow {
 }
 
 // =====================================================
-//  HEALTH & INCIDENT (Mobile Form)
+//  HEALTH & INCIDENT (Mobile Form + Case Workflow)
 // =====================================================
 
 enum HealthIncidentReportStatus {
@@ -1041,6 +1041,9 @@ enum HealthIncidentReportStatus {
 
 model HealthIncidentReport {
   id String @id @default(cuid())
+
+  // ✅ NEW: human-friendly case number
+  caseNumber String? @unique
 
   // Optional link to shift
   shiftId String?
@@ -1092,9 +1095,22 @@ model HealthIncidentReport {
   investigatedByStaffId String?
   investigatedByName    String?
 
+  // ✅ NEW: case visibility / final close summary
+  allowDspViewOutcome Boolean @default(false)
+  finalDecision       String?
+  finalSummary        String?
+
+  closedAt       DateTime?
+  closedByUserId String?
+  closedByName   String?
+
   // ✅ NEW: direct-download report paths (saved on server filesystem)
   staffReportDocPath String?
   staffReportPdfPath String?
+
+  // ✅ NEW: timeline + attachments
+  caseLogs    HealthIncidentCaseLog[]
+  attachments HealthIncidentAttachment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1108,7 +1124,54 @@ model HealthIncidentReport {
   @@index([shiftId])
   @@index([ciAssignedAt])
   @@index([investigatedAt])
+  @@index([closedAt])
 
   // ✅ map đúng table DB trong Supabase (case-sensitive)
   @@map("HealthIncidentReport")
+}
+
+model HealthIncidentCaseLog {
+  id String @id @default(cuid())
+
+  reportId String
+  report   HealthIncidentReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  actionType      String
+  actorUserId     String?
+  actorEmployeeId String?
+  actorName       String?
+  actorRole       String?
+  note            String?
+  meta            Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([reportId, createdAt])
+  @@index([actionType])
+  @@map("HealthIncidentCaseLog")
+}
+
+model HealthIncidentAttachment {
+  id String @id @default(cuid())
+
+  reportId String
+  report   HealthIncidentReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  category    String
+  fileName    String
+  filePath    String
+  mimeType    String?
+  fileSize    Int?
+  description String?
+
+  uploadedByUserId     String?
+  uploadedByEmployeeId String?
+  uploadedByName       String?
+  uploadedByRole       String?
+
+  createdAt DateTime @default(now())
+
+  @@index([reportId, createdAt])
+  @@index([category])
+  @@map("HealthIncidentAttachment")
 }

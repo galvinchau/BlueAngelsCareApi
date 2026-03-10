@@ -24,7 +24,7 @@
   "dependencies": {
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",
-    "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/platform-express": "^11.1.12",
     "@nestjs/serve-static": "^5.0.4",
     "@prisma/client": "^6.18.0",
     "class-transformer": "^0.5.1",
@@ -37,6 +37,7 @@
     "google-auth-library": "^10.5.0",
     "googleapis": "^168.0.0",
     "luxon": "^3.7.2",
+    "multer": "^2.1.1",
     "nodemailer": "^7.0.11",
     "pdf-lib": "^1.17.1",
     "pizzip": "^3.2.0",
@@ -72,13 +73,11 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.20.0"
   },
-
   "pnpm": {
     "overrides": {
       "lru-cache": "^11.0.2"
     }
   },
-
   "jest": {
     "moduleFileExtensions": [
       "js",

@@ -1,4 +1,6 @@
 // src/reports/reports.service.ts
+import * as fs from 'fs';
+import * as path from 'path';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { DateTime } from 'luxon';
@@ -6,7 +8,24 @@ import { MailService } from '../mail/mail.service';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
 const TZ = 'America/New_York';
+const HEALTH_INCIDENT_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 
+const HEALTH_INCIDENT_ALLOWED_EXTENSIONS = new Set([
+  '.pdf',
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.doc',
+  '.docx',
+]);
+
+const HEALTH_INCIDENT_ALLOWED_MIME_TYPES = new Set([
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
 const INCIDENT_TYPES_LEFT = [
   'Physical Abuse',
   'Mental Abuse',
@@ -44,6 +63,19 @@ export type HealthIncidentFilter = {
   status?: string;
 };
 
+export type HealthIncidentAttachmentInput = {
+  category?: string;
+  fileName?: string;
+  filePath?: string;
+  mimeType?: string;
+  fileSize?: number;
+  description?: string;
+  uploadedByUserId?: string;
+  uploadedByEmployeeId?: string;
+  uploadedByName?: string;
+  uploadedByRole?: string;
+};
+
 @Injectable()
 export class ReportsService {
   constructor(
@@ -58,6 +90,15 @@ export class ReportsService {
   private toLocalTimeHHmm(d?: Date | null): string {
     if (!d) return '';
     return DateTime.fromJSDate(d, { zone: 'utc' }).setZone(TZ).toFormat('HH:mm') ?? '';
+  }
+
+  private toLocalDateTime(d?: Date | null): string {
+    if (!d) return '';
+    return (
+      DateTime.fromJSDate(d, { zone: 'utc' })
+        .setZone(TZ)
+        .toFormat('yyyy-LL-dd hh:mm a') ?? ''
+    );
   }
 
   private normalizeDateInput(v?: string): string | undefined {
@@ -287,6 +328,159 @@ export class ReportsService {
     }
 
     return maxLines ? out.slice(0, maxLines) : out;
+  }
+
+  private healthIncidentSelect() {
+    return {
+      id: true,
+      caseNumber: true,
+      date: true,
+      createdAt: true as any,
+      status: true,
+      submittedAt: true,
+      payload: true,
+
+      staffId: true,
+      staffName: true,
+      staffEmail: true,
+
+      individualId: true,
+      individualName: true,
+
+      shiftId: true,
+      shift: {
+        select: {
+          id: true,
+          scheduleDate: true,
+          plannedStart: true,
+          plannedEnd: true,
+          service: { select: { serviceCode: true, serviceName: true } },
+        },
+      },
+
+      supervisorName: true,
+      supervisorDecision: true,
+      supervisorActionsTaken: true,
+      reviewedAt: true,
+
+      ciName: true,
+      ciEmail: true,
+      ciPhone: true,
+      ciAssignedAt: true,
+      ciAssignedByUserId: true,
+      ciAssignedByName: true,
+
+      investigationFindings: true,
+      rootCause: true,
+      witnessNotes: true,
+      correctiveActions: true,
+      recommendation: true,
+      investigatedAt: true,
+      investigatedByStaffId: true,
+      investigatedByName: true,
+
+      allowDspViewOutcome: true,
+      finalDecision: true,
+      finalSummary: true,
+      closedAt: true,
+      closedByUserId: true,
+      closedByName: true,
+
+      staffReportDocPath: true,
+      staffReportPdfPath: true,
+    };
+  }
+
+  private async addHealthIncidentCaseLog(args: {
+    reportId: string;
+    actionType: string;
+    actorUserId?: string | null;
+    actorEmployeeId?: string | null;
+    actorName?: string | null;
+    actorRole?: string | null;
+    note?: string | null;
+    meta?: any;
+  }) {
+    try {
+      await this.prisma.healthIncidentCaseLog.create({
+        data: {
+          reportId: args.reportId,
+          actionType: this.safeStr(args.actionType).trim(),
+          actorUserId: this.asText(args.actorUserId) || null,
+          actorEmployeeId: this.asText(args.actorEmployeeId) || null,
+          actorName: this.asText(args.actorName) || null,
+          actorRole: this.asText(args.actorRole) || null,
+          note: this.asText(args.note) || null,
+          meta: args.meta ?? null,
+        },
+      });
+    } catch (e: any) {
+      console.error('[HealthIncidentCaseLog] failed', e?.message ?? e);
+    }
+  }
+
+  private buildCaseClosedRecipients(updated: any): string[] {
+    const emails = [
+      this.asText(updated?.staffEmail),
+      this.asText(updated?.ciEmail),
+    ].filter(Boolean);
+
+    return Array.from(new Set(emails.map((x) => x.toLowerCase())));
+  }
+
+  private async sendCiSubmittedEmailSafe(updated: any, mapped: any) {
+    try {
+      const supervisorEmailCandidate = this.asText(updated?.ciAssignedByUserId);
+      const fallbackTo = '';
+
+      const to =
+        supervisorEmailCandidate && supervisorEmailCandidate.includes('@')
+          ? supervisorEmailCandidate
+          : fallbackTo;
+
+      if (!to) return;
+
+      const sendFn = (this.mailService as any)?.sendCiConclusionSubmittedEmail;
+      if (typeof sendFn !== 'function') return;
+
+      await sendFn.call(this.mailService, {
+        to,
+        supervisorName: updated?.supervisorName || updated?.ciAssignedByName || null,
+        ciName: updated?.investigatedByName || updated?.ciName || null,
+        individualName: updated?.individualName || null,
+        incidentType: mapped?.incidentType || null,
+        reportDateLocal: updated?.date ? this.toLocalISODate(updated.date) : null,
+        link: this.buildHealthIncidentWebUrl(updated?.id),
+      });
+    } catch (e: any) {
+      console.error('[sendCiSubmittedEmailSafe] failed', e?.message ?? e);
+    }
+  }
+
+  private async sendCaseClosedSummaryEmailSafe(updated: any, mapped: any) {
+    try {
+      const to = this.buildCaseClosedRecipients(updated);
+      if (!to.length) return;
+
+      const sendFn = (this.mailService as any)?.sendCaseClosedSummaryEmail;
+      if (typeof sendFn !== 'function') return;
+
+      await sendFn.call(this.mailService, {
+        to,
+        individualName: updated?.individualName || null,
+        dspName: updated?.staffName || null,
+        ciName: updated?.ciName || updated?.investigatedByName || null,
+        incidentType: mapped?.incidentType || null,
+        reportDateLocal: updated?.date ? this.toLocalISODate(updated.date) : null,
+        finalDecision: updated?.finalDecision || updated?.supervisorDecision || null,
+        finalSummary: updated?.finalSummary || null,
+        closedByName: updated?.closedByName || updated?.supervisorName || null,
+        closedDateLocal: updated?.closedAt ? this.toLocalDateTime(updated.closedAt) : null,
+        link: this.buildHealthIncidentWebUrl(updated?.id),
+      });
+    } catch (e: any) {
+      console.error('[sendCaseClosedSummaryEmailSafe] failed', e?.message ?? e);
+    }
   }
 
   private async buildHealthIncidentPdfBuffer(args: {
@@ -531,9 +725,7 @@ export class ReportsService {
     const incidentTypeList = this.extractIncidentTypeList(args.incidentType, payload);
 
     const incidentDate = this.asText(payload.incidentDate) || this.asText(args.dateLocal) || reportDate;
-
     const incidentTime = this.asText(payload.incidentTime);
-
     const location = this.asText(payload.location) || this.asText(payload.incidentLocation);
 
     const description =
@@ -547,7 +739,6 @@ export class ReportsService {
     const reporterSignatureDate = this.asText(payload.reportDate) || reportDate || '-';
 
     const witnesses = this.joinWitnessesFromPayload(payload);
-
     const additionalNotes = this.asText(payload.additionalNotes) || this.asText(payload.attachments);
 
     const supervisorSignatureName =
@@ -952,45 +1143,7 @@ export class ReportsService {
     const rows = await this.prisma.healthIncidentReport.findMany({
       where,
       orderBy: { date: 'desc' },
-      select: {
-        id: true,
-        date: true,
-        createdAt: true as any,
-        status: true,
-        submittedAt: true,
-
-        staffId: true,
-        staffName: true,
-        staffEmail: true,
-
-        individualId: true,
-        individualName: true,
-
-        payload: true,
-
-        shiftId: true,
-        shift: {
-          select: {
-            id: true,
-            scheduleDate: true,
-            plannedStart: true,
-            plannedEnd: true,
-            service: { select: { serviceCode: true, serviceName: true } },
-          },
-        },
-
-        supervisorName: true,
-        supervisorDecision: true,
-        supervisorActionsTaken: true,
-        reviewedAt: true,
-
-        ciName: true,
-        ciEmail: true,
-        ciPhone: true,
-        ciAssignedAt: true,
-        ciAssignedByUserId: true,
-        ciAssignedByName: true,
-      },
+      select: this.healthIncidentSelect(),
     });
 
     return rows.map((r: any) => this.mapHealthIncidentRow(r));
@@ -1002,6 +1155,7 @@ export class ReportsService {
       orderBy: { date: 'desc' },
       select: {
         id: true,
+        caseNumber: true,
         date: true,
         createdAt: true as any,
         staffName: true,
@@ -1014,6 +1168,7 @@ export class ReportsService {
       ids: rows.map((r: any) => r.id),
       items: rows.map((r: any) => ({
         id: r.id,
+        caseNumber: r.caseNumber ?? null,
         dateLocal: r.date ? this.toLocalISODate(r.date) : '',
         createdAt: r.createdAt ?? null,
         staffName: r.staffName ?? null,
@@ -1025,59 +1180,358 @@ export class ReportsService {
   async getHealthIncidentReportDetail(id: string) {
     const rpt = await this.prisma.healthIncidentReport.findUnique({
       where: { id },
-      select: {
-        id: true,
-        date: true,
-        createdAt: true as any,
-        status: true,
-        submittedAt: true,
-        payload: true,
-
-        staffId: true,
-        staffName: true,
-        staffEmail: true,
-
-        individualId: true,
-        individualName: true,
-
-        shiftId: true,
-        shift: {
-          select: {
-            id: true,
-            scheduleDate: true,
-            plannedStart: true,
-            plannedEnd: true,
-            service: { select: { serviceCode: true, serviceName: true } },
-          },
-        },
-
-        supervisorName: true,
-        supervisorDecision: true,
-        supervisorActionsTaken: true,
-        reviewedAt: true,
-
-        ciName: true,
-        ciEmail: true,
-        ciPhone: true,
-        ciAssignedAt: true,
-        ciAssignedByUserId: true,
-        ciAssignedByName: true,
-
-        investigationFindings: true,
-        rootCause: true,
-        witnessNotes: true,
-        correctiveActions: true,
-        recommendation: true,
-        investigatedAt: true,
-        investigatedByStaffId: true,
-        investigatedByName: true,
-      },
+      select: this.healthIncidentSelect(),
     });
 
     if (!rpt) return null;
     return this.mapHealthIncidentRow(rpt as any);
   }
 
+  async getHealthIncidentTimeline(id: string) {
+    const exists = await this.prisma.healthIncidentReport.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!exists) return null;
+
+    const rows = await this.prisma.healthIncidentCaseLog.findMany({
+      where: { reportId: id },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        actionType: true,
+        actorUserId: true,
+        actorEmployeeId: true,
+        actorName: true,
+        actorRole: true,
+        note: true,
+        meta: true,
+        createdAt: true,
+      },
+    });
+
+    return rows.map((x: any) => ({
+      ...x,
+      createdAtLocal: x.createdAt ? this.toLocalDateTime(x.createdAt) : '',
+    }));
+  }
+
+  async getHealthIncidentAttachments(id: string) {
+    const exists = await this.prisma.healthIncidentReport.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!exists) return null;
+
+    const rows = await this.prisma.healthIncidentAttachment.findMany({
+      where: { reportId: id },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        category: true,
+        fileName: true,
+        filePath: true,
+        mimeType: true,
+        fileSize: true,
+        description: true,
+        uploadedByUserId: true,
+        uploadedByEmployeeId: true,
+        uploadedByName: true,
+        uploadedByRole: true,
+        createdAt: true,
+      },
+    });
+
+    return rows.map((x: any) => ({
+      ...x,
+      createdAtLocal: x.createdAt ? this.toLocalDateTime(x.createdAt) : '',
+    }));
+  }
+
+    async getHealthIncidentAttachmentForDownload(
+    reportId: string,
+    attachmentId: string,
+  ) {
+    const report = await this.prisma.healthIncidentReport.findUnique({
+      where: { id: reportId },
+      select: { id: true },
+    });
+    if (!report) return null;
+
+    const attachment = await this.prisma.healthIncidentAttachment.findFirst({
+      where: {
+        id: attachmentId,
+        reportId,
+      },
+      select: {
+        id: true,
+        reportId: true,
+        category: true,
+        fileName: true,
+        filePath: true,
+        mimeType: true,
+        fileSize: true,
+        description: true,
+        createdAt: true,
+      },
+    });
+
+    if (!attachment) return null;
+    return attachment;
+  }
+
+  getHealthIncidentAttachmentAbsolutePath(filePath: string): string {
+    const safeRelative = this.asText(filePath).replace(/\\/g, '/');
+    if (!safeRelative) {
+      throw new Error('Missing file path');
+    }
+
+    const uploadsRoot = path.resolve(process.cwd(), 'uploads');
+    const absPath = path.resolve(process.cwd(), safeRelative);
+
+    if (
+      absPath !== uploadsRoot &&
+      !absPath.startsWith(uploadsRoot + path.sep)
+    ) {
+      throw new Error('Invalid file path');
+    }
+
+    if (!fs.existsSync(absPath)) {
+      throw new Error('Attachment file not found on server');
+    }
+
+    return absPath;
+  }
+
+  async addHealthIncidentAttachment(id: string, body: HealthIncidentAttachmentInput) {
+    const exists = await this.prisma.healthIncidentReport.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!exists) return null;
+
+    const category = this.asText(body.category) || 'CI_EVIDENCE';
+    const fileName = this.asText(body.fileName);
+    const filePath = this.asText(body.filePath);
+
+    if (!fileName || !filePath) {
+      throw new Error('Missing fileName or filePath');
+    }
+
+    const created = await this.prisma.healthIncidentAttachment.create({
+      data: {
+        reportId: id,
+        category,
+        fileName,
+        filePath,
+        mimeType: this.asText(body.mimeType) || null,
+        fileSize:
+          typeof body.fileSize === 'number' && Number.isFinite(body.fileSize)
+            ? Math.trunc(body.fileSize)
+            : null,
+        description: this.asText(body.description) || null,
+        uploadedByUserId: this.asText(body.uploadedByUserId) || null,
+        uploadedByEmployeeId: this.asText(body.uploadedByEmployeeId) || null,
+        uploadedByName: this.asText(body.uploadedByName) || null,
+        uploadedByRole: this.asText(body.uploadedByRole) || null,
+      },
+      select: {
+        id: true,
+        category: true,
+        fileName: true,
+        filePath: true,
+        mimeType: true,
+        fileSize: true,
+        description: true,
+        uploadedByUserId: true,
+        uploadedByEmployeeId: true,
+        uploadedByName: true,
+        uploadedByRole: true,
+        createdAt: true,
+      },
+    });
+
+    await this.addHealthIncidentCaseLog({
+      reportId: id,
+      actionType: 'ATTACHMENT_UPLOADED',
+      actorUserId: body.uploadedByUserId || null,
+      actorEmployeeId: body.uploadedByEmployeeId || null,
+      actorName: body.uploadedByName || null,
+      actorRole: body.uploadedByRole || null,
+      note: `${category}: ${fileName}`,
+      meta: {
+        category,
+        fileName,
+        filePath,
+        mimeType: body.mimeType || null,
+        fileSize: body.fileSize ?? null,
+      },
+    });
+
+    return {
+      ...created,
+      createdAtLocal: created.createdAt ? this.toLocalDateTime(created.createdAt) : '',
+    };
+  }
+
+    private sanitizeUploadFileName(fileName: string): string {
+    const base = this.safeStr(fileName).trim() || 'attachment';
+    return base
+      .replace(/[\\\/:*?"<>|]+/g, '_')
+      .replace(/\s+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^\.+/, '')
+      .slice(0, 180);
+  }
+
+  private ensureDirectoryExists(dirPath: string) {
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+  }
+
+  private validateHealthIncidentUploadFile(file: any) {
+    if (!file) {
+      throw new Error('Missing upload file');
+    }
+
+    const originalName = this.safeStr(file.originalname).trim();
+    const ext = path.extname(originalName).toLowerCase();
+    const mimeType = this.safeStr(file.mimetype).trim().toLowerCase();
+
+    if (!originalName) {
+      throw new Error('Invalid file name');
+    }
+
+    if (!HEALTH_INCIDENT_ALLOWED_EXTENSIONS.has(ext)) {
+      throw new Error(
+        'Invalid file type. Allowed: pdf, jpg, jpeg, png, doc, docx',
+      );
+    }
+
+    if (mimeType && !HEALTH_INCIDENT_ALLOWED_MIME_TYPES.has(mimeType)) {
+      throw new Error(
+        'Invalid mime type. Allowed: pdf, jpg, jpeg, png, doc, docx',
+      );
+    }
+
+    const fileSize = Number(file.size || 0);
+    if (!Number.isFinite(fileSize) || fileSize <= 0) {
+      throw new Error('Invalid file size');
+    }
+
+    if (fileSize > HEALTH_INCIDENT_UPLOAD_MAX_BYTES) {
+      throw new Error('File size exceeds 10MB limit');
+    }
+  }
+
+  private buildHealthIncidentUploadRelativePath(
+    reportId: string,
+    originalFileName: string,
+  ): string {
+    const safeReportId = this.safeStr(reportId).trim();
+    const safeFileName = this.sanitizeUploadFileName(originalFileName);
+    const timestamp = Date.now();
+
+    return path.join(
+      'uploads',
+      'health-incident',
+      safeReportId,
+      `${timestamp}_${safeFileName}`,
+    );
+  }
+
+  async uploadHealthIncidentAttachment(
+    id: string,
+    file: any,
+    body: {
+      category?: string;
+      description?: string;
+      uploadedByUserId?: string;
+      uploadedByEmployeeId?: string;
+      uploadedByName?: string;
+      uploadedByRole?: string;
+    },
+  ) {
+    const exists = await this.prisma.healthIncidentReport.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!exists) return null;
+
+    this.validateHealthIncidentUploadFile(file);
+
+    const relativeFilePath = this.buildHealthIncidentUploadRelativePath(
+      id,
+      file.originalname,
+    );
+    const absoluteFilePath = path.resolve(process.cwd(), relativeFilePath);
+    const absoluteDir = path.dirname(absoluteFilePath);
+
+    this.ensureDirectoryExists(absoluteDir);
+
+    fs.writeFileSync(absoluteFilePath, file.buffer);
+
+    const category = this.asText(body.category) || 'CI_EVIDENCE';
+    const fileName = this.sanitizeUploadFileName(file.originalname) || 'attachment';
+    const mimeType = this.asText(file.mimetype) || null;
+    const fileSize =
+      typeof file.size === 'number' && Number.isFinite(file.size)
+        ? Math.trunc(file.size)
+        : null;
+
+    const created = await this.prisma.healthIncidentAttachment.create({
+      data: {
+        reportId: id,
+        category,
+        fileName,
+        filePath: relativeFilePath.replace(/\\/g, '/'),
+        mimeType,
+        fileSize,
+        description: this.asText(body.description) || null,
+        uploadedByUserId: this.asText(body.uploadedByUserId) || null,
+        uploadedByEmployeeId: this.asText(body.uploadedByEmployeeId) || null,
+        uploadedByName: this.asText(body.uploadedByName) || null,
+        uploadedByRole: this.asText(body.uploadedByRole) || null,
+      },
+      select: {
+        id: true,
+        category: true,
+        fileName: true,
+        filePath: true,
+        mimeType: true,
+        fileSize: true,
+        description: true,
+        uploadedByUserId: true,
+        uploadedByEmployeeId: true,
+        uploadedByName: true,
+        uploadedByRole: true,
+        createdAt: true,
+      },
+    });
+
+    await this.addHealthIncidentCaseLog({
+      reportId: id,
+      actionType: 'ATTACHMENT_UPLOADED',
+      actorUserId: body.uploadedByUserId || null,
+      actorEmployeeId: body.uploadedByEmployeeId || null,
+      actorName: body.uploadedByName || null,
+      actorRole: body.uploadedByRole || null,
+      note: `${category}: ${fileName}`,
+      meta: {
+        category,
+        fileName,
+        filePath: created.filePath,
+        mimeType,
+        fileSize,
+      },
+    });
+
+    return {
+      ...created,
+      createdAtLocal: created.createdAt ? this.toLocalDateTime(created.createdAt) : '',
+    };
+  }
   async saveHealthIncidentReview(
     id: string,
     body: {
@@ -1085,11 +1539,19 @@ export class ReportsService {
       supervisorName?: string;
       supervisorDecision?: string;
       supervisorActionsTaken?: string;
+      actorUserId?: string;
+      actorName?: string;
     },
   ) {
     const exists = await this.prisma.healthIncidentReport.findUnique({
       where: { id },
-      select: { id: true },
+      select: {
+        id: true,
+        status: true,
+        supervisorName: true,
+        supervisorDecision: true,
+        supervisorActionsTaken: true,
+      },
     });
     if (!exists) return null;
 
@@ -1115,56 +1577,124 @@ export class ReportsService {
     const updated = await this.prisma.healthIncidentReport.update({
       where: { id },
       data,
+      select: this.healthIncidentSelect(),
+    });
+
+    const mapped = this.mapHealthIncidentRow(updated as any);
+
+    await this.addHealthIncidentCaseLog({
+      reportId: id,
+      actionType: 'REVIEW_SAVED',
+      actorUserId: body.actorUserId || null,
+      actorName: body.actorName || body.supervisorName || null,
+      actorRole: 'SUPERVISOR',
+      note: 'Supervisor review updated',
+      meta: {
+        previous: {
+          status: exists.status,
+          supervisorName: exists.supervisorName,
+          supervisorDecision: exists.supervisorDecision,
+          supervisorActionsTaken: exists.supervisorActionsTaken,
+        },
+        current: {
+          status: updated.status,
+          supervisorName: updated.supervisorName,
+          supervisorDecision: updated.supervisorDecision,
+          supervisorActionsTaken: updated.supervisorActionsTaken,
+        },
+      },
+    });
+
+    return mapped;
+  }
+
+  async saveHealthIncidentInvestigation(
+    id: string,
+    body: {
+      investigationFindings?: string;
+      rootCause?: string;
+      witnessNotes?: string;
+      correctiveActions?: string;
+      recommendation?: string;
+      investigatedByStaffId?: string;
+      investigatedByName?: string;
+      actorUserId?: string;
+      actorName?: string;
+    },
+  ) {
+    const exists = await this.prisma.healthIncidentReport.findUnique({
+      where: { id },
       select: {
         id: true,
-        date: true,
-        createdAt: true as any,
         status: true,
-        submittedAt: true,
-        payload: true,
-
-        staffId: true,
-        staffName: true,
-        staffEmail: true,
-
-        individualId: true,
-        individualName: true,
-
-        shiftId: true,
-        shift: {
-          select: {
-            id: true,
-            scheduleDate: true,
-            plannedStart: true,
-            plannedEnd: true,
-            service: { select: { serviceCode: true, serviceName: true } },
-          },
-        },
-
-        supervisorName: true,
-        supervisorDecision: true,
-        supervisorActionsTaken: true,
-        reviewedAt: true,
-
-        ciName: true,
-        ciEmail: true,
-        ciPhone: true,
-        ciAssignedAt: true,
-        ciAssignedByUserId: true,
-        ciAssignedByName: true,
-
         investigationFindings: true,
         rootCause: true,
         witnessNotes: true,
         correctiveActions: true,
         recommendation: true,
-        investigatedAt: true,
         investigatedByStaffId: true,
         investigatedByName: true,
       },
     });
+    if (!exists) return null;
 
-    return this.mapHealthIncidentRow(updated as any);
+    const data: any = {
+      status: 'INVESTIGATED',
+      investigatedAt: new Date(),
+    };
+
+    if (body.investigationFindings !== undefined) data.investigationFindings = body.investigationFindings;
+    if (body.rootCause !== undefined) data.rootCause = body.rootCause;
+    if (body.witnessNotes !== undefined) data.witnessNotes = body.witnessNotes;
+    if (body.correctiveActions !== undefined) data.correctiveActions = body.correctiveActions;
+    if (body.recommendation !== undefined) data.recommendation = body.recommendation;
+    if (body.investigatedByStaffId !== undefined) data.investigatedByStaffId = body.investigatedByStaffId;
+    if (body.investigatedByName !== undefined) data.investigatedByName = body.investigatedByName;
+
+    const updated = await this.prisma.healthIncidentReport.update({
+      where: { id },
+      data,
+      select: this.healthIncidentSelect(),
+    });
+
+    const mapped = this.mapHealthIncidentRow(updated as any);
+
+    await this.addHealthIncidentCaseLog({
+      reportId: id,
+      actionType: 'CI_SUBMITTED',
+      actorUserId: body.actorUserId || null,
+      actorEmployeeId: body.investigatedByStaffId || null,
+      actorName: body.actorName || body.investigatedByName || null,
+      actorRole: 'CI',
+      note: 'Investigation submitted',
+      meta: {
+        previous: {
+          status: exists.status,
+          investigationFindings: exists.investigationFindings,
+          rootCause: exists.rootCause,
+          witnessNotes: exists.witnessNotes,
+          correctiveActions: exists.correctiveActions,
+          recommendation: exists.recommendation,
+          investigatedByStaffId: exists.investigatedByStaffId,
+          investigatedByName: exists.investigatedByName,
+        },
+        current: {
+          status: updated.status,
+          investigationFindings: updated.investigationFindings,
+          rootCause: updated.rootCause,
+          witnessNotes: updated.witnessNotes,
+          correctiveActions: updated.correctiveActions,
+          recommendation: updated.recommendation,
+          investigatedByStaffId: updated.investigatedByStaffId,
+          investigatedByName: updated.investigatedByName,
+          investigatedAt: updated.investigatedAt,
+        },
+      },
+    });
+
+    await this.sendCiSubmittedEmailSafe(updated, mapped);
+
+    return mapped;
   }
 
   async closeHealthIncidentReport(
@@ -1173,76 +1703,97 @@ export class ReportsService {
       supervisorName?: string;
       supervisorDecision?: string;
       supervisorActionsTaken?: string;
+      finalDecision?: string;
+      finalSummary?: string;
+      allowDspViewOutcome?: boolean;
+      closedByUserId?: string;
+      closedByName?: string;
+      actorUserId?: string;
+      actorName?: string;
     },
   ) {
     const exists = await this.prisma.healthIncidentReport.findUnique({
       where: { id },
-      select: { id: true },
+      select: {
+        id: true,
+        status: true,
+        supervisorName: true,
+        supervisorDecision: true,
+        supervisorActionsTaken: true,
+        finalDecision: true,
+        finalSummary: true,
+        allowDspViewOutcome: true,
+        closedAt: true,
+        closedByUserId: true,
+        closedByName: true,
+      },
     });
     if (!exists) return null;
 
     const data: any = {
       status: 'CLOSED',
       reviewedAt: new Date(),
+      closedAt: new Date(),
     };
 
     if (body.supervisorName !== undefined) data.supervisorName = body.supervisorName;
     if (body.supervisorDecision !== undefined) data.supervisorDecision = body.supervisorDecision;
     if (body.supervisorActionsTaken !== undefined) data.supervisorActionsTaken = body.supervisorActionsTaken;
+    if (body.finalDecision !== undefined) data.finalDecision = body.finalDecision;
+    if (body.finalSummary !== undefined) data.finalSummary = body.finalSummary;
+    if (typeof body.allowDspViewOutcome === 'boolean') {
+      data.allowDspViewOutcome = body.allowDspViewOutcome;
+    }
+    if (body.closedByUserId !== undefined) data.closedByUserId = body.closedByUserId;
+    if (body.closedByName !== undefined) data.closedByName = body.closedByName;
 
     const updated = await this.prisma.healthIncidentReport.update({
       where: { id },
       data,
-      select: {
-        id: true,
-        date: true,
-        createdAt: true as any,
-        status: true,
-        submittedAt: true,
-        payload: true,
+      select: this.healthIncidentSelect(),
+    });
 
-        staffId: true,
-        staffName: true,
-        staffEmail: true,
+    const mapped = this.mapHealthIncidentRow(updated as any);
 
-        individualId: true,
-        individualName: true,
-
-        shiftId: true,
-        shift: {
-          select: {
-            id: true,
-            scheduleDate: true,
-            plannedStart: true,
-            plannedEnd: true,
-            service: { select: { serviceCode: true, serviceName: true } },
-          },
+    await this.addHealthIncidentCaseLog({
+      reportId: id,
+      actionType: 'CASE_CLOSED',
+      actorUserId: body.actorUserId || body.closedByUserId || null,
+      actorName:
+        body.actorName || body.closedByName || body.supervisorName || updated.supervisorName || null,
+      actorRole: 'SUPERVISOR',
+      note: 'Case closed',
+      meta: {
+        previous: {
+          status: exists.status,
+          supervisorName: exists.supervisorName,
+          supervisorDecision: exists.supervisorDecision,
+          supervisorActionsTaken: exists.supervisorActionsTaken,
+          finalDecision: exists.finalDecision,
+          finalSummary: exists.finalSummary,
+          allowDspViewOutcome: exists.allowDspViewOutcome,
+          closedAt: exists.closedAt,
+          closedByUserId: exists.closedByUserId,
+          closedByName: exists.closedByName,
         },
-
-        supervisorName: true,
-        supervisorDecision: true,
-        supervisorActionsTaken: true,
-        reviewedAt: true,
-
-        ciName: true,
-        ciEmail: true,
-        ciPhone: true,
-        ciAssignedAt: true,
-        ciAssignedByUserId: true,
-        ciAssignedByName: true,
-
-        investigationFindings: true,
-        rootCause: true,
-        witnessNotes: true,
-        correctiveActions: true,
-        recommendation: true,
-        investigatedAt: true,
-        investigatedByStaffId: true,
-        investigatedByName: true,
+        current: {
+          status: updated.status,
+          supervisorName: updated.supervisorName,
+          supervisorDecision: updated.supervisorDecision,
+          supervisorActionsTaken: updated.supervisorActionsTaken,
+          finalDecision: updated.finalDecision,
+          finalSummary: updated.finalSummary,
+          allowDspViewOutcome: updated.allowDspViewOutcome,
+          closedAt: updated.closedAt,
+          closedByUserId: updated.closedByUserId,
+          closedByName: updated.closedByName,
+        },
       },
     });
 
-    return this.mapHealthIncidentRow(updated as any);
+    await this.sendCaseClosedSummaryEmailSafe(updated, mapped);
+
+    return mapped;
   }
 
   async assignCI(
@@ -1257,7 +1808,15 @@ export class ReportsService {
   ) {
     const exists = await this.prisma.healthIncidentReport.findUnique({
       where: { id },
-      select: { id: true },
+      select: {
+        id: true,
+        ciName: true,
+        ciEmail: true,
+        ciPhone: true,
+        ciAssignedAt: true,
+        ciAssignedByUserId: true,
+        ciAssignedByName: true,
+      },
     });
     if (!exists) return null;
 
@@ -1278,59 +1837,50 @@ export class ReportsService {
     const updated = await this.prisma.healthIncidentReport.update({
       where: { id },
       data,
-      select: {
-        id: true,
-        date: true,
-        createdAt: true as any,
-        status: true,
-        submittedAt: true,
-        payload: true,
-
-        staffId: true,
-        staffName: true,
-        staffEmail: true,
-
-        individualId: true,
-        individualName: true,
-
-        shiftId: true,
-        shift: {
-          select: {
-            id: true,
-            scheduleDate: true,
-            plannedStart: true,
-            plannedEnd: true,
-            service: { select: { serviceCode: true, serviceName: true } },
-          },
-        },
-
-        supervisorName: true,
-        supervisorDecision: true,
-        supervisorActionsTaken: true,
-        reviewedAt: true,
-
-        ciName: true,
-        ciEmail: true,
-        ciPhone: true,
-        ciAssignedAt: true,
-        ciAssignedByUserId: true,
-        ciAssignedByName: true,
-
-        investigationFindings: true,
-        rootCause: true,
-        witnessNotes: true,
-        correctiveActions: true,
-        recommendation: true,
-        investigatedAt: true,
-        investigatedByStaffId: true,
-        investigatedByName: true,
-      },
+      select: this.healthIncidentSelect(),
     });
 
     const mapped = this.mapHealthIncidentRow(updated as any);
-
     const ciEmail = String((updated as any).ciEmail || '').trim();
     const webUrl = this.buildHealthIncidentWebUrl(id);
+
+    const previousCi = [exists.ciName, exists.ciEmail, exists.ciPhone]
+      .map((x) => this.asText(x))
+      .filter(Boolean)
+      .join(' | ');
+    const currentCi = [updated.ciName, updated.ciEmail, updated.ciPhone]
+      .map((x: any) => this.asText(x))
+      .filter(Boolean)
+      .join(' | ');
+
+    await this.addHealthIncidentCaseLog({
+      reportId: id,
+      actionType: previousCi ? 'CI_REASSIGNED' : 'CI_ASSIGNED',
+      actorUserId: body.ciAssignedByUserId || null,
+      actorName: body.ciAssignedByName || null,
+      actorRole: 'SUPERVISOR',
+      note: previousCi ? 'CI reassigned' : 'CI assigned',
+      meta: {
+        previous: {
+          ciName: exists.ciName,
+          ciEmail: exists.ciEmail,
+          ciPhone: exists.ciPhone,
+          ciAssignedAt: exists.ciAssignedAt,
+          ciAssignedByUserId: exists.ciAssignedByUserId,
+          ciAssignedByName: exists.ciAssignedByName,
+        },
+        current: {
+          ciName: updated.ciName,
+          ciEmail: updated.ciEmail,
+          ciPhone: updated.ciPhone,
+          ciAssignedAt: updated.ciAssignedAt,
+          ciAssignedByUserId: updated.ciAssignedByUserId,
+          ciAssignedByName: updated.ciAssignedByName,
+        },
+        previousCi,
+        currentCi,
+      },
+    });
 
     console.log('[assignCI] start mail flow', {
       reportId: id,

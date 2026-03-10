@@ -9,15 +9,20 @@ import {
   BadRequestException,
   Patch,
   Body,
+  Post,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import {
-  ReportsService,
+import { ReportsService } from './reports.service';
+import type {
   DailyNotesFilter,
   HealthIncidentFilter,
+  HealthIncidentAttachmentInput,
 } from './reports.service';
 import { FileReportsService } from './file-reports.service';
 
@@ -248,10 +253,6 @@ export class ReportsController {
     return { items };
   }
 
-  /**
-   * Optional lightweight endpoint for unread summary.
-   * Current meaning of "new" = status SUBMITTED.
-   */
   @Get('health-incident/unread/summary')
   async getHealthIncidentUnreadSummary() {
     return this.reportsService.getHealthIncidentUnreadSummary();
@@ -262,9 +263,159 @@ export class ReportsController {
     if (!id || String(id).trim() === '') {
       throw new BadRequestException('Missing id');
     }
+
     const rpt = await this.reportsService.getHealthIncidentReportDetail(id);
     if (!rpt) throw new NotFoundException('HealthIncidentReport not found');
     return rpt;
+  }
+
+  @Get('health-incident/:id/timeline')
+  async getHealthIncidentTimeline(@Param('id') id: string) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    const items = await this.reportsService.getHealthIncidentTimeline(id);
+    if (!items) throw new NotFoundException('HealthIncidentReport not found');
+    return { items };
+  }
+
+  @Get('health-incident/:id/attachments')
+  async getHealthIncidentAttachments(@Param('id') id: string) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    const items = await this.reportsService.getHealthIncidentAttachments(id);
+    if (!items) throw new NotFoundException('HealthIncidentReport not found');
+    return { items };
+  }
+
+    @Get('health-incident/:id/attachments/:attachmentId/download')
+  async downloadHealthIncidentAttachment(
+    @Param('id') id: string,
+    @Param('attachmentId') attachmentId: string,
+    @Res() res: Response,
+  ) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    if (!attachmentId || String(attachmentId).trim() === '') {
+      throw new BadRequestException('Missing attachmentId');
+    }
+
+    try {
+      const attachment =
+        await this.reportsService.getHealthIncidentAttachmentForDownload(
+          id,
+          attachmentId,
+        );
+
+      if (!attachment) {
+        throw new NotFoundException('Attachment not found');
+      }
+
+      const absPath =
+        this.reportsService.getHealthIncidentAttachmentAbsolutePath(
+          attachment.filePath,
+        );
+
+      const contentType =
+        attachment.mimeType?.trim() || 'application/octet-stream';
+
+      const downloadName = sanitizeName(
+        attachment.fileName || `attachment-${attachment.id}`,
+      );
+
+      res.setHeader('Content-Type', contentType);
+      res.setHeader(
+        'Content-Disposition',
+        `inline; filename="${downloadName}"`,
+      );
+
+      const stream = fs.createReadStream(absPath);
+      stream.pipe(res);
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+
+      if (msg.toLowerCase().includes('not found')) {
+        throw new NotFoundException(msg);
+      }
+
+      throw new BadRequestException(msg);
+    }
+  }
+
+  @Post('health-incident/:id/attachments')
+  async addHealthIncidentAttachment(
+    @Param('id') id: string,
+    @Body() body: HealthIncidentAttachmentInput,
+  ) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    try {
+      const created = await this.reportsService.addHealthIncidentAttachment(
+        id,
+        body ?? {},
+      );
+      if (!created) {
+        throw new NotFoundException('HealthIncidentReport not found');
+      }
+      return created;
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (msg.toLowerCase().includes('not found')) {
+        throw new NotFoundException('HealthIncidentReport not found');
+      }
+      throw new BadRequestException(msg);
+    }
+  }
+
+  @Post('health-incident/:id/attachments/upload')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadHealthIncidentAttachment(
+    @Param('id') id: string,
+    @UploadedFile() file?: any,
+    @Body()
+    body?: {
+      category?: string;
+      description?: string;
+      uploadedByUserId?: string;
+      uploadedByEmployeeId?: string;
+      uploadedByName?: string;
+      uploadedByRole?: string;
+    },
+  ) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    if (!file) {
+      throw new BadRequestException('Missing upload file');
+    }
+
+    try {
+      const created = await this.reportsService.uploadHealthIncidentAttachment(
+        id,
+        file,
+        body ?? {},
+      );
+
+      if (!created) {
+        throw new NotFoundException('HealthIncidentReport not found');
+      }
+
+      return created;
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (msg.toLowerCase().includes('not found')) {
+        throw new NotFoundException('HealthIncidentReport not found');
+      }
+      throw new BadRequestException(msg);
+    }
   }
 
   @Patch('health-incident/:id/review')
@@ -276,6 +427,8 @@ export class ReportsController {
       supervisorName?: string;
       supervisorDecision?: string;
       supervisorActionsTaken?: string;
+      actorUserId?: string;
+      actorName?: string;
     },
   ) {
     if (!id || String(id).trim() === '') {
@@ -283,6 +436,34 @@ export class ReportsController {
     }
 
     const updated = await this.reportsService.saveHealthIncidentReview(
+      id,
+      body ?? {},
+    );
+    if (!updated) throw new NotFoundException('HealthIncidentReport not found');
+    return updated;
+  }
+
+  @Patch('health-incident/:id/investigation')
+  async saveHealthIncidentInvestigation(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      investigationFindings?: string;
+      rootCause?: string;
+      witnessNotes?: string;
+      correctiveActions?: string;
+      recommendation?: string;
+      investigatedByStaffId?: string;
+      investigatedByName?: string;
+      actorUserId?: string;
+      actorName?: string;
+    },
+  ) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    const updated = await this.reportsService.saveHealthIncidentInvestigation(
       id,
       body ?? {},
     );
@@ -298,6 +479,13 @@ export class ReportsController {
       supervisorName?: string;
       supervisorDecision?: string;
       supervisorActionsTaken?: string;
+      finalDecision?: string;
+      finalSummary?: string;
+      allowDspViewOutcome?: boolean;
+      closedByUserId?: string;
+      closedByName?: string;
+      actorUserId?: string;
+      actorName?: string;
     },
   ) {
     if (!id || String(id).trim() === '') {
