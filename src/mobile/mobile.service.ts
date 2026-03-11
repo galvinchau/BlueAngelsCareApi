@@ -517,6 +517,31 @@ export class MobileService {
     return created.id;
   }
 
+  private async generateNextHealthIncidentCaseNumber(): Promise<string> {
+    const prismaAny = this.prisma as any;
+
+    const latestWithCaseNumber = await prismaAny.healthIncidentReport.findFirst({
+      where: {
+        caseNumber: {
+          not: null,
+        },
+      },
+      orderBy: [
+        { createdAt: 'desc' },
+        { date: 'desc' },
+      ],
+      select: {
+        caseNumber: true,
+      },
+    });
+
+    const current = String(latestWithCaseNumber?.caseNumber || '').trim();
+    const match = /^HIR-(\d+)$/.exec(current);
+
+    const nextNumber = match ? Number(match[1]) + 1 : 1;
+    return `HIR-${String(nextNumber).padStart(6, '0')}`;
+  }
+
   // =====================================================
   // Start Unknown Visit (AD-HOC)
   // =====================================================
@@ -1043,8 +1068,11 @@ export class MobileService {
     }
 
     try {
+      const caseNumber = await this.generateNextHealthIncidentCaseNumber();
+
       const record = await prismaAny.healthIncidentReport.create({
         data: {
+          caseNumber,
           shiftId: payload.shiftId ?? null,
           staffId: staffTechId,
           staffName: payload.staffName ?? null,
@@ -1065,10 +1093,10 @@ export class MobileService {
           supervisorActionsTaken: null,
           reviewedAt: null,
         },
-        select: { id: true },
+        select: { id: true, caseNumber: true },
       });
 
-      return { status: 'OK', id: record.id };
+      return { status: 'OK', id: record.id, caseNumber: record.caseNumber };
     } catch (err: any) {
       console.error('[MobileService] submitHealthIncident failed', {
         staffIdRaw,
