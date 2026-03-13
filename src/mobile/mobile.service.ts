@@ -7,14 +7,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import {
-  ScheduleStatus,
-  VisitSource,
-  type Individual,
-  type ScheduleShift,
-  type Service,
-  type Visit,
-} from '@prisma/client';
+import { ScheduleStatus, VisitSource, type Individual } from '@prisma/client';
 import { DateTime } from 'luxon';
 import { PrismaService } from '../prisma/prisma.service';
 import { GoogleReportsService } from '../reports/google-reports.service';
@@ -98,7 +91,6 @@ export interface MobileDailyNotePayload {
   overReason?: string;
 }
 
-// ✅ NEW: Health & Incident payload from Mobile
 export interface MobileHealthIncidentPayload {
   staffId: string;
   staffName?: string;
@@ -107,16 +99,12 @@ export interface MobileHealthIncidentPayload {
   individualId?: string | null;
   individualName?: string | null;
 
-  // optional link to shift/visit
   shiftId?: string | null;
 
-  // YYYY-MM-DD (local)
   date: string;
 
-  // full form data (matches Word form fields on mobile)
   payload: Record<string, any>;
 
-  // optional: allow status from client (default SUBMITTED)
   status?: 'DRAFT' | 'SUBMITTED';
 }
 
@@ -220,12 +208,31 @@ function uniqStrings(arr: Array<string | null | undefined>): string[] {
   return out;
 }
 
+function pickRelevantVisitsForMobileShift(params: {
+  visits: any[];
+  staffIds?: string[];
+  date: string;
+}): any[] {
+  const { visits, staffIds, date } = params;
+
+  const visitsFiltered = staffIds?.length
+    ? visits.filter((v) => staffIds.includes(v.dspId))
+    : visits;
+
+  const openVisits = visitsFiltered.filter((v) => !!v.checkInAt && !v.checkOutAt);
+  if (openVisits.length > 0) return openVisits;
+
+  return visitsFiltered.filter((v) => {
+    if (!v.checkInAt) return false;
+    const localDateStr = DateTime.fromJSDate(v.checkInAt)
+      .setZone(TZ)
+      .toISODate();
+    return localDateStr === date;
+  });
+}
+
 function mapShiftToMobileShift(params: {
-  shift: ScheduleShift & {
-    individual: Individual;
-    service: Service;
-    visits: Visit[];
-  };
+  shift: any;
   staffIds: string[];
   date: string;
 }): MobileShift {
@@ -245,12 +252,10 @@ function mapShiftToMobileShift(params: {
       break;
   }
 
-  const visitsForDsp = visits.filter((v) => {
-    if (!staffIds.includes(v.dspId) || !v.checkInAt) return false;
-    const localDateStr = DateTime.fromJSDate(v.checkInAt)
-      .setZone(TZ)
-      .toISODate();
-    return localDateStr === date;
+  const visitsForDsp = pickRelevantVisitsForMobileShift({
+    visits,
+    staffIds,
+    date,
   });
 
   let visitStart: string | null = null;
@@ -299,11 +304,7 @@ function mapShiftToMobileShift(params: {
 }
 
 function mapShiftToMobileShiftForClientDetail(params: {
-  shift: ScheduleShift & {
-    individual: Individual;
-    service: Service;
-    visits: Visit[];
-  };
+  shift: any;
   date: string;
   staffIds?: string[];
 }): MobileShift {
@@ -323,28 +324,22 @@ function mapShiftToMobileShiftForClientDetail(params: {
       break;
   }
 
-  const visitsFiltered = staffIds?.length
-    ? visits.filter((v) => staffIds.includes(v.dspId))
-    : visits;
-
-  const visitsSameDay = visitsFiltered.filter((v) => {
-    if (!v.checkInAt) return false;
-    const localDateStr = DateTime.fromJSDate(v.checkInAt)
-      .setZone(TZ)
-      .toISODate();
-    return localDateStr === date;
+  const visitsFiltered = pickRelevantVisitsForMobileShift({
+    visits,
+    staffIds,
+    date,
   });
 
   let visitStart: string | null = null;
   let visitEnd: string | null = null;
 
-  if (visitsSameDay.length > 0) {
-    const sorted = [...visitsSameDay].sort((a, b) =>
+  if (visitsFiltered.length > 0) {
+    const sorted = [...visitsFiltered].sort((a, b) =>
       a.checkInAt < b.checkInAt ? -1 : 1,
     );
     const earliest = sorted[0];
 
-    const latest = visitsSameDay.reduce((max, v) => {
+    const latest = visitsFiltered.reduce((max, v) => {
       const vEnd = v.checkOutAt ?? v.checkInAt;
       const maxEnd = max.checkOutAt ?? max.checkInAt;
       return vEnd > maxEnd ? v : max;
@@ -353,7 +348,7 @@ function mapShiftToMobileShiftForClientDetail(params: {
     visitStart = formatTimeHHmmInTZ(earliest.checkInAt);
     visitEnd = formatTimeHHmmInTZ(latest.checkOutAt ?? latest.checkInAt);
 
-    if (visitsSameDay.some((v) => !v.checkOutAt)) status = 'IN_PROGRESS';
+    if (visitsFiltered.some((v) => !v.checkOutAt)) status = 'IN_PROGRESS';
     else status = 'COMPLETED';
   }
 
@@ -526,10 +521,7 @@ export class MobileService {
           not: null,
         },
       },
-      orderBy: [
-        { createdAt: 'desc' },
-        { date: 'desc' },
-      ],
+      orderBy: [{ createdAt: 'desc' }, { date: 'desc' }],
       select: {
         caseNumber: true,
       },
@@ -542,9 +534,6 @@ export class MobileService {
     return `HIR-${String(nextNumber).padStart(6, '0')}`;
   }
 
-  // =====================================================
-  // Start Unknown Visit (AD-HOC)
-  // =====================================================
   async startUnknownVisit(
     input: StartUnknownVisitInput,
   ): Promise<{ shiftId: string }> {
@@ -581,8 +570,9 @@ export class MobileService {
       where: { serviceCode },
       select: { id: true, serviceCode: true, serviceName: true },
     });
-    if (!service)
+    if (!service) {
       throw new BadRequestException(`Service not found: ${serviceCode}`);
+    }
 
     const now = input.clientTime
       ? DateTime.fromISO(input.clientTime, { setZone: true }).setZone(TZ)
@@ -606,15 +596,11 @@ export class MobileService {
             scheduleDate,
             individualId: individual.id,
             serviceId: service.id,
-
             plannedStart,
             plannedEnd,
-
             plannedDspId: staffTechId,
             actualDspId: staffTechId,
-
             status: ScheduleStatus.IN_PROGRESS,
-
             notes: `ADHOC_UNKNOWN_VISIT | Medicaid:${String(
               input.medicaidId ?? '',
             ).trim()} | ClientId:${String(input.clientId ?? '').trim()}`.trim(),
@@ -744,9 +730,6 @@ export class MobileService {
     });
   }
 
-  // =====================================================
-  // Today shifts for mobile
-  // =====================================================
   async getTodayShifts(
     staffId: string,
     date: string,
@@ -768,8 +751,29 @@ export class MobileService {
 
     const shifts = await this.prisma.scheduleShift.findMany({
       where: {
-        scheduleDate: { gte: dayStartLocal, lte: dayEndLocal },
-        OR: [{ plannedDspId: staffTechId }, { actualDspId: staffTechId }],
+        OR: [
+          {
+            AND: [
+              {
+                scheduleDate: { gte: dayStartLocal, lte: dayEndLocal },
+              },
+              {
+                OR: [
+                  { plannedDspId: staffTechId },
+                  { actualDspId: staffTechId },
+                ],
+              },
+            ],
+          },
+          {
+            visits: {
+              some: {
+                dspId: { in: staffIds },
+                checkOutAt: { equals: null },
+              },
+            },
+          },
+        ],
       },
       include: {
         individual: true,
@@ -777,7 +781,6 @@ export class MobileService {
         visits: {
           where: {
             dspId: { in: staffIds },
-            checkInAt: { gte: dayStartLocal, lte: dayEndLocal },
           },
           orderBy: { checkInAt: 'asc' },
         },
@@ -792,9 +795,6 @@ export class MobileService {
     };
   }
 
-  // =====================================================
-  // 3-week shifts window
-  // =====================================================
   async getShiftsWindow(
     staffId: string,
     date?: string,
@@ -822,8 +822,29 @@ export class MobileService {
 
     const shifts = await this.prisma.scheduleShift.findMany({
       where: {
-        scheduleDate: { gte: rangeStartJs, lte: rangeEndJs },
-        OR: [{ plannedDspId: staffTechId }, { actualDspId: staffTechId }],
+        OR: [
+          {
+            AND: [
+              {
+                scheduleDate: { gte: rangeStartJs, lte: rangeEndJs },
+              },
+              {
+                OR: [
+                  { plannedDspId: staffTechId },
+                  { actualDspId: staffTechId },
+                ],
+              },
+            ],
+          },
+          {
+            visits: {
+              some: {
+                dspId: { in: staffIds },
+                checkOutAt: { equals: null },
+              },
+            },
+          },
+        ],
       },
       include: {
         individual: true,
@@ -831,7 +852,6 @@ export class MobileService {
         visits: {
           where: {
             dspId: { in: staffIds },
-            checkInAt: { gte: rangeStartJs, lte: rangeEndJs },
           },
           orderBy: { checkInAt: 'asc' },
         },
@@ -873,17 +893,34 @@ export class MobileService {
       });
     }
 
+    const openVisitOrConditions = staffIds?.length
+      ? [
+          {
+            visits: {
+              some: {
+                dspId: { in: staffIds },
+                checkOutAt: { equals: null },
+              },
+            },
+          },
+        ]
+      : [];
+
     const shifts = await this.prisma.scheduleShift.findMany({
       where: {
-        scheduleDate: { gte: dayStartLocal, lte: dayEndLocal },
         individualId,
+        OR: [
+          {
+            scheduleDate: { gte: dayStartLocal, lte: dayEndLocal },
+          },
+          ...openVisitOrConditions,
+        ],
       },
       include: {
         individual: true,
         service: true,
         visits: {
           where: {
-            checkInAt: { gte: dayStartLocal, lte: dayEndLocal },
             ...(staffIds?.length ? { dspId: { in: staffIds } } : {}),
           },
           orderBy: { checkInAt: 'asc' },
@@ -903,9 +940,6 @@ export class MobileService {
     };
   }
 
-  // =====================================================
-  // Save Daily Note from mobile
-  // =====================================================
   async submitDailyNote(payload: MobileDailyNotePayload) {
     const {
       shiftId,
@@ -1039,10 +1073,6 @@ export class MobileService {
     return { status: 'OK', id: record.id };
   }
 
-  // =====================================================
-  // ✅ NEW: Save Health & Incident from mobile (DB)
-  // POST /mobile/health-incident
-  // =====================================================
   async submitHealthIncident(payload: MobileHealthIncidentPayload) {
     const staffIdRaw = String(payload?.staffId ?? '').trim();
     if (!staffIdRaw) throw new BadRequestException('Missing staffId');
@@ -1061,7 +1091,6 @@ export class MobileService {
 
     const prismaAny = this.prisma as any;
     if (!prismaAny?.healthIncidentReport?.create) {
-      // ✅ align to your workflow: NO migrate, use SQL + generate
       throw new BadRequestException(
         'HealthIncidentReport is not deployed yet. Please run Supabase SQL to create the table, then run pnpm prisma generate.',
       );
@@ -1111,9 +1140,6 @@ export class MobileService {
     }
   }
 
-  // =====================================================
-  // Check-in
-  // =====================================================
   async checkInShift(
     shiftId: string,
     staffId: string,
@@ -1209,9 +1235,6 @@ export class MobileService {
     };
   }
 
-  // =====================================================
-  // Check-out
-  // =====================================================
   async checkOutShift(
     shiftId: string,
     staffId: string,
