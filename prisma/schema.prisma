@@ -478,6 +478,8 @@ model Visit {
   gpsLatitude  Float?
   gpsLongitude Float?
 
+  reviewedAt DateTime?
+
   scheduleShift ScheduleShift? @relation(fields: [scheduleShiftId], references: [id])
   individual    Individual     @relation(fields: [individualId], references: [id], onDelete: Cascade)
   dsp           Employee       @relation("VisitDSP", fields: [dspId], references: [id])

@@ -23,6 +23,9 @@ import { PayrollModule } from './payroll/payroll.module';
 // ✅ MAIL (NEW)
 import { MailModule } from './mail/mail.module';
 
+// ✅ VISITED MAINTENANCE
+import { VisitedMaintenanceModule } from './visited-maintenance/visited-maintenance.module';
+
 @Module({
   imports: [
     // ✅ Serve /exports/* from local folder: uploads/exports
@@ -48,6 +51,9 @@ import { MailModule } from './mail/mail.module';
 
     // ✅ MAIL (NEW)
     MailModule,
+
+    // ✅ VISITED MAINTENANCE
+    VisitedMaintenanceModule,
   ],
   controllers: [
     AppController,
