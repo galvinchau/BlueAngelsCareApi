@@ -21,6 +21,12 @@ enum IndividualStatus {
   INACTIVE
 }
 
+// ✅ NEW: Billing payer for Rate Setup
+// Hiện tại BAC chỉ dùng ODP
+enum BillingPayer {
+  ODP
+}
+
 model Individual {
   id   String @id @default(cuid()) // khoá kỹ thuật
   code String @unique // mã hiển thị, sẽ sinh từ Counter
@@ -309,6 +315,33 @@ model Service {
   scheduleShifts       ScheduleShift[]
   visits               Visit[]
   ispAllocations       ISPAllocation[]
+  serviceRates         ServiceRate[]
+}
+
+/**
+ * ServiceRate = bảng rate setup cho billing
+ * - Hiện tại chỉ dùng payer = ODP
+ * - Service phải bám đúng bảng Service BAC đang dùng
+ * - Mỗi payer + service chỉ có 1 rate hiện hành
+ */
+model ServiceRate {
+  id String @id @default(cuid())
+
+  payer BillingPayer @default(ODP)
+
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  rate Float
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([payer, serviceId], name: "service_rate_payer_service_unique")
+  @@index([payer])
+  @@index([serviceId])
+  @@map("ServiceRate")
 }
 
 // =====================================================

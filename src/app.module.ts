@@ -26,6 +26,9 @@ import { MailModule } from './mail/mail.module';
 // ✅ VISITED MAINTENANCE
 import { VisitedMaintenanceModule } from './visited-maintenance/visited-maintenance.module';
 
+// ✅ SERVICE RATES
+import { ServiceRatesModule } from './service-rates/service-rates.module';
+
 @Module({
   imports: [
     // ✅ Serve /exports/* from local folder: uploads/exports
@@ -54,6 +57,9 @@ import { VisitedMaintenanceModule } from './visited-maintenance/visited-maintena
 
     // ✅ VISITED MAINTENANCE
     VisitedMaintenanceModule,
+
+    // ✅ SERVICE RATES
+    ServiceRatesModule,
   ],
   controllers: [
     AppController,

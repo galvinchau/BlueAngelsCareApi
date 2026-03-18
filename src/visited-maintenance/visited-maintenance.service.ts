@@ -1,12 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  BillingPayer,
   ScheduleStatus,
   VisitSource as PrismaVisitSource,
 } from '@prisma/client';
 
 type UiVisitStatus = 'OPEN' | 'COMPLETED' | 'CANCELED';
 type UiVisitSource = 'SCHEDULE' | 'MOBILE' | 'MANUAL';
+type UiRateStatus = 'FOUND' | 'MISSING';
 
 function toPartsInTimeZone(date: Date | null | undefined, timeZone: string) {
   if (!date) return null;
@@ -57,6 +59,10 @@ function minutesToRoundedHourUnits(minutes: number | null | undefined) {
 
 function buildFullName(parts: Array<string | null | undefined>) {
   return parts.filter(Boolean).join(' ').trim() || '—';
+}
+
+function roundMoney(value: number) {
+  return Math.round(value * 100) / 100;
 }
 
 @Injectable()
@@ -110,8 +116,20 @@ export class VisitedMaintenanceService {
         },
         service: {
           select: {
+            id: true,
             serviceCode: true,
             serviceName: true,
+            serviceRates: {
+              where: {
+                payer: BillingPayer.ODP,
+              },
+              select: {
+                id: true,
+                payer: true,
+                rate: true,
+              },
+              take: 1,
+            },
           },
         },
         scheduleShift: {
@@ -155,19 +173,37 @@ export class VisitedMaintenanceService {
         visit.durationMinutes ??
         diffMinutes(visit.checkInAt, visit.checkOutAt);
 
+      const unitsActual =
+        typeof visit.units === 'number'
+          ? visit.units
+          : minutesToRoundedHourUnits(actualMinutes);
+
+      const odpRateRow = visit.service?.serviceRates?.[0] ?? null;
+      const rate = typeof odpRateRow?.rate === 'number' ? odpRateRow.rate : 0;
+      const amount = roundMoney(unitsActual * rate);
+      const rateStatus: UiRateStatus = odpRateRow ? 'FOUND' : 'MISSING';
+
       return {
         id: visit.id,
         date:
           toIsoDateInNewYork(visit.scheduleShift?.scheduleDate) ||
           toIsoDateInNewYork(visit.checkInAt) ||
           '',
+
         individualName: buildFullName([
           visit.individual.firstName,
           visit.individual.middleName,
           visit.individual.lastName,
         ]),
+
         dspName: buildFullName([visit.dsp.firstName, visit.dsp.lastName]),
+
+        serviceId: visit.service?.id ?? null,
         serviceCode: visit.service?.serviceCode || visit.service?.serviceName || '—',
+        serviceName: visit.service?.serviceName || '—',
+
+        // ✅ Billing phase rule: ODP only
+        payer: BillingPayer.ODP,
 
         plannedStart: toHmInNewYork(visit.scheduleShift?.plannedStart) || '—',
         plannedEnd: toHmInNewYork(visit.scheduleShift?.plannedEnd) || '—',
@@ -176,10 +212,12 @@ export class VisitedMaintenanceService {
         checkOut: toHmInNewYork(visit.checkOutAt),
 
         unitsPlanned: minutesToRoundedHourUnits(plannedMinutes),
-        unitsActual:
-          typeof visit.units === 'number'
-            ? visit.units
-            : minutesToRoundedHourUnits(actualMinutes),
+        unitsActual,
+
+        // ✅ NEW: rate data from ServiceRate (ODP only)
+        rate,
+        amount,
+        rateStatus,
 
         status: this.mapStatus({
           shiftStatus: visit.scheduleShift?.status,
