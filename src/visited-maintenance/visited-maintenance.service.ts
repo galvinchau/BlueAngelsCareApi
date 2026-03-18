@@ -1,14 +1,23 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
 import {
   BillingPayer,
   ScheduleStatus,
   VisitSource as PrismaVisitSource,
 } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
 
 type UiVisitStatus = 'OPEN' | 'COMPLETED' | 'CANCELED';
 type UiVisitSource = 'SCHEDULE' | 'MOBILE' | 'MANUAL';
 type UiRateStatus = 'FOUND' | 'MISSING';
+
+type RateLite = {
+  id: string;
+  serviceId: string;
+  rate: number;
+  effectiveFrom: Date;
+  effectiveTo: Date | null;
+  isActive: boolean;
+};
 
 function toPartsInTimeZone(date: Date | null | undefined, timeZone: string) {
   if (!date) return null;
@@ -97,6 +106,47 @@ export class VisitedMaintenanceService {
     return 'OPEN';
   }
 
+  /**
+   * Convert any timestamp to a stable "service day anchor" in America/New_York.
+   * We intentionally anchor to 12:00 PM local day to avoid edge cases caused by:
+   * - effectiveFrom stored at 00:00:00
+   * - effectiveTo stored at 23:59:59.999
+   * - visit check-in happening at arbitrary hours
+   *
+   * This keeps date-based matching stable without hardcoding any business date.
+   */
+  private toServiceDayAnchor(date?: Date | null): Date | null {
+    if (!date) return null;
+
+    const isoDate = toIsoDateInNewYork(date);
+    if (!isoDate) return null;
+
+    return new Date(`${isoDate}T12:00:00`);
+  }
+
+  private pickEffectiveRate(
+    rateMap: Map<string, RateLite[]>,
+    serviceId?: string | null,
+    visitDate?: Date | null,
+  ): RateLite | null {
+    if (!serviceId || !visitDate) return null;
+
+    const candidates = rateMap.get(serviceId) || [];
+    if (!candidates.length) return null;
+
+    for (const row of candidates) {
+      const startsOk = row.effectiveFrom.getTime() <= visitDate.getTime();
+      const endsOk =
+        !row.effectiveTo || row.effectiveTo.getTime() >= visitDate.getTime();
+
+      if (startsOk && endsOk) {
+        return row;
+      }
+    }
+
+    return null;
+  }
+
   async listVisits() {
     const visits = await this.prisma.visit.findMany({
       orderBy: { checkInAt: 'desc' },
@@ -119,17 +169,6 @@ export class VisitedMaintenanceService {
             id: true,
             serviceCode: true,
             serviceName: true,
-            serviceRates: {
-              where: {
-                payer: BillingPayer.ODP,
-              },
-              select: {
-                id: true,
-                payer: true,
-                rate: true,
-              },
-              take: 1,
-            },
           },
         },
         scheduleShift: {
@@ -163,6 +202,40 @@ export class VisitedMaintenanceService {
       noteLinks.map((x) => x.visitId).filter((x): x is string => Boolean(x)),
     );
 
+    // Load rates one time only to avoid connection-pool pressure
+    const serviceIds = Array.from(
+      new Set(
+        visits.map((v) => v.service?.id).filter((x): x is string => Boolean(x)),
+      ),
+    );
+
+    const rateRows =
+      serviceIds.length > 0
+        ? await this.prisma.serviceRate.findMany({
+            where: {
+              payer: BillingPayer.ODP,
+              isActive: true,
+              serviceId: { in: serviceIds },
+            },
+            select: {
+              id: true,
+              serviceId: true,
+              rate: true,
+              effectiveFrom: true,
+              effectiveTo: true,
+              isActive: true,
+            },
+            orderBy: [{ serviceId: 'asc' }, { effectiveFrom: 'desc' }],
+          })
+        : [];
+
+    const rateMap = new Map<string, RateLite[]>();
+    for (const row of rateRows) {
+      const arr = rateMap.get(row.serviceId) || [];
+      arr.push(row);
+      rateMap.set(row.serviceId, arr);
+    }
+
     return visits.map((visit) => {
       const plannedMinutes = diffMinutes(
         visit.scheduleShift?.plannedStart,
@@ -170,18 +243,31 @@ export class VisitedMaintenanceService {
       );
 
       const actualMinutes =
-        visit.durationMinutes ??
-        diffMinutes(visit.checkInAt, visit.checkOutAt);
+        visit.durationMinutes ?? diffMinutes(visit.checkInAt, visit.checkOutAt);
 
       const unitsActual =
         typeof visit.units === 'number'
           ? visit.units
           : minutesToRoundedHourUnits(actualMinutes);
 
-      const odpRateRow = visit.service?.serviceRates?.[0] ?? null;
-      const rate = typeof odpRateRow?.rate === 'number' ? odpRateRow.rate : 0;
+      const rawVisitDate =
+        visit.checkInAt ?? visit.scheduleShift?.scheduleDate ?? null;
+
+      const visitDateForRate = this.toServiceDayAnchor(rawVisitDate);
+
+      const effectiveRate = this.pickEffectiveRate(
+        rateMap,
+        visit.service?.id ?? null,
+        visitDateForRate,
+      );
+
+      const rate =
+        effectiveRate && typeof effectiveRate.rate === 'number'
+          ? effectiveRate.rate
+          : 0;
+
       const amount = roundMoney(unitsActual * rate);
-      const rateStatus: UiRateStatus = odpRateRow ? 'FOUND' : 'MISSING';
+      const rateStatus: UiRateStatus = effectiveRate ? 'FOUND' : 'MISSING';
 
       return {
         id: visit.id,
@@ -199,10 +285,10 @@ export class VisitedMaintenanceService {
         dspName: buildFullName([visit.dsp.firstName, visit.dsp.lastName]),
 
         serviceId: visit.service?.id ?? null,
-        serviceCode: visit.service?.serviceCode || visit.service?.serviceName || '—',
+        serviceCode:
+          visit.service?.serviceCode || visit.service?.serviceName || '—',
         serviceName: visit.service?.serviceName || '—',
 
-        // ✅ Billing phase rule: ODP only
         payer: BillingPayer.ODP,
 
         plannedStart: toHmInNewYork(visit.scheduleShift?.plannedStart) || '—',
@@ -214,10 +300,11 @@ export class VisitedMaintenanceService {
         unitsPlanned: minutesToRoundedHourUnits(plannedMinutes),
         unitsActual,
 
-        // ✅ NEW: rate data from ServiceRate (ODP only)
         rate,
         amount,
         rateStatus,
+        rateEffectiveFrom: effectiveRate?.effectiveFrom ?? null,
+        rateEffectiveTo: effectiveRate?.effectiveTo ?? null,
 
         status: this.mapStatus({
           shiftStatus: visit.scheduleShift?.status,

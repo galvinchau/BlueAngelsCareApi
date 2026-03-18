@@ -23,6 +23,45 @@ export class ServiceRatesService {
     return finalPayer;
   }
 
+  private normalizeStartOfDay(value?: string | Date | null): Date {
+    if (!value) {
+      const now = new Date();
+      now.setHours(0, 0, 0, 0);
+      return now;
+    }
+
+    const dt = value instanceof Date ? new Date(value) : new Date(value);
+    if (Number.isNaN(dt.getTime())) {
+      throw new BadRequestException('Effective From is invalid.');
+    }
+
+    dt.setHours(0, 0, 0, 0);
+    return dt;
+  }
+
+  private normalizeEndOfDay(value?: string | Date | null): Date | null {
+    if (!value) return null;
+
+    const dt = value instanceof Date ? new Date(value) : new Date(value);
+    if (Number.isNaN(dt.getTime())) {
+      throw new BadRequestException('Effective To is invalid.');
+    }
+
+    dt.setHours(23, 59, 59, 999);
+    return dt;
+  }
+
+  private validateEffectiveRange(
+    effectiveFrom: Date,
+    effectiveTo: Date | null,
+  ) {
+    if (effectiveTo && effectiveTo.getTime() < effectiveFrom.getTime()) {
+      throw new BadRequestException(
+        'Effective To cannot be earlier than Effective From.',
+      );
+    }
+  }
+
   private async ensureServiceExists(serviceId: string) {
     const service = await this.prisma.service.findUnique({
       where: { id: serviceId },
@@ -30,6 +69,7 @@ export class ServiceRatesService {
         id: true,
         serviceCode: true,
         serviceName: true,
+        billingCode: true,
         status: true,
         billable: true,
         category: true,
@@ -41,6 +81,47 @@ export class ServiceRatesService {
     }
 
     return service;
+  }
+
+  private mapRateRow(row: {
+    id: string;
+    payer: BillingPayer;
+    serviceId: string;
+    rate: number;
+    effectiveFrom: Date;
+    effectiveTo: Date | null;
+    isActive: boolean;
+    notes: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+    service: {
+      id: string;
+      serviceCode: string;
+      serviceName: string;
+      billingCode: string | null;
+      category: string;
+      status: string;
+      billable: boolean;
+    };
+  }) {
+    return {
+      id: row.id,
+      payer: row.payer,
+      serviceId: row.serviceId,
+      serviceCode: row.service.serviceCode,
+      serviceName: row.service.serviceName,
+      billingCode: row.service.billingCode,
+      category: row.service.category,
+      serviceStatus: row.service.status,
+      billable: row.service.billable,
+      rate: row.rate,
+      effectiveFrom: row.effectiveFrom,
+      effectiveTo: row.effectiveTo,
+      isActive: row.isActive,
+      notes: row.notes,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
   }
 
   async getServiceLookup() {
@@ -71,7 +152,12 @@ export class ServiceRatesService {
 
     const rows = await this.prisma.serviceRate.findMany({
       where: finalPayer ? { payer: finalPayer } : undefined,
-      orderBy: [{ payer: 'asc' }, { service: { category: 'asc' } }, { service: { serviceCode: 'asc' } }],
+      orderBy: [
+        { payer: 'asc' },
+        { service: { category: 'asc' } },
+        { service: { serviceCode: 'asc' } },
+        { effectiveFrom: 'desc' },
+      ],
       include: {
         service: {
           select: {
@@ -88,21 +174,7 @@ export class ServiceRatesService {
     });
 
     return {
-      items: rows.map((row) => ({
-        id: row.id,
-        payer: row.payer,
-        serviceId: row.serviceId,
-        serviceCode: row.service.serviceCode,
-        serviceName: row.service.serviceName,
-        billingCode: row.service.billingCode,
-        category: row.service.category,
-        serviceStatus: row.service.status,
-        billable: row.service.billable,
-        rate: row.rate,
-        notes: row.notes,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      })),
+      items: rows.map((row) => this.mapRateRow(row)),
     };
   }
 
@@ -128,26 +200,19 @@ export class ServiceRatesService {
       throw new NotFoundException('Service rate not found.');
     }
 
-    return {
-      id: row.id,
-      payer: row.payer,
-      serviceId: row.serviceId,
-      serviceCode: row.service.serviceCode,
-      serviceName: row.service.serviceName,
-      billingCode: row.service.billingCode,
-      category: row.service.category,
-      serviceStatus: row.service.status,
-      billable: row.service.billable,
-      rate: row.rate,
-      notes: row.notes,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    };
+    return this.mapRateRow(row);
   }
 
   async create(dto: CreateServiceRateDto) {
     const payer = this.normalizePayer(dto.payer);
     const service = await this.ensureServiceExists(dto.serviceId);
+
+    const effectiveFrom = this.normalizeStartOfDay((dto as any).effectiveFrom);
+    const effectiveTo = this.normalizeEndOfDay((dto as any).effectiveTo);
+    const isActive =
+      typeof (dto as any).isActive === 'boolean' ? (dto as any).isActive : true;
+
+    this.validateEffectiveRange(effectiveFrom, effectiveTo);
 
     try {
       const created = await this.prisma.serviceRate.create({
@@ -155,6 +220,9 @@ export class ServiceRatesService {
           payer,
           serviceId: dto.serviceId,
           rate: Number(dto.rate),
+          effectiveFrom,
+          effectiveTo,
+          isActive,
           notes: dto.notes?.trim() || null,
         },
         include: {
@@ -174,21 +242,7 @@ export class ServiceRatesService {
 
       return {
         message: 'Service rate created successfully.',
-        item: {
-          id: created.id,
-          payer: created.payer,
-          serviceId: created.serviceId,
-          serviceCode: created.service.serviceCode,
-          serviceName: created.service.serviceName,
-          billingCode: created.service.billingCode,
-          category: created.service.category,
-          serviceStatus: created.service.status,
-          billable: created.service.billable,
-          rate: created.rate,
-          notes: created.notes,
-          createdAt: created.createdAt,
-          updatedAt: created.updatedAt,
-        },
+        item: this.mapRateRow(created),
       };
     } catch (error: any) {
       if (
@@ -196,7 +250,7 @@ export class ServiceRatesService {
         error.code === 'P2002'
       ) {
         throw new ConflictException(
-          `Rate already exists for payer ${payer} and service ${service.serviceCode}.`,
+          `Rate already exists for payer ${payer}, service ${service.serviceCode}, and effective date.`,
         );
       }
       throw error;
@@ -226,6 +280,23 @@ export class ServiceRatesService {
 
     await this.ensureServiceExists(nextServiceId);
 
+    const nextEffectiveFrom =
+      (dto as any).effectiveFrom !== undefined
+        ? this.normalizeStartOfDay((dto as any).effectiveFrom)
+        : existing.effectiveFrom;
+
+    const nextEffectiveTo =
+      (dto as any).effectiveTo !== undefined
+        ? this.normalizeEndOfDay((dto as any).effectiveTo)
+        : existing.effectiveTo;
+
+    const nextIsActive =
+      typeof (dto as any).isActive === 'boolean'
+        ? (dto as any).isActive
+        : existing.isActive;
+
+    this.validateEffectiveRange(nextEffectiveFrom, nextEffectiveTo);
+
     try {
       const updated = await this.prisma.serviceRate.update({
         where: { id },
@@ -233,6 +304,9 @@ export class ServiceRatesService {
           payer: nextPayer,
           serviceId: nextServiceId,
           rate: dto.rate !== undefined ? Number(dto.rate) : undefined,
+          effectiveFrom: nextEffectiveFrom,
+          effectiveTo: nextEffectiveTo,
+          isActive: nextIsActive,
           notes: dto.notes !== undefined ? dto.notes.trim() || null : undefined,
         },
         include: {
@@ -252,21 +326,7 @@ export class ServiceRatesService {
 
       return {
         message: 'Service rate updated successfully.',
-        item: {
-          id: updated.id,
-          payer: updated.payer,
-          serviceId: updated.serviceId,
-          serviceCode: updated.service.serviceCode,
-          serviceName: updated.service.serviceName,
-          billingCode: updated.service.billingCode,
-          category: updated.service.category,
-          serviceStatus: updated.service.status,
-          billable: updated.service.billable,
-          rate: updated.rate,
-          notes: updated.notes,
-          createdAt: updated.createdAt,
-          updatedAt: updated.updatedAt,
-        },
+        item: this.mapRateRow(updated),
       };
     } catch (error: any) {
       if (
@@ -274,7 +334,7 @@ export class ServiceRatesService {
         error.code === 'P2002'
       ) {
         throw new ConflictException(
-          'Another service rate already exists for this payer and service.',
+          'Another service rate already exists for this payer, service, and effective date.',
         );
       }
       throw error;
@@ -284,9 +344,7 @@ export class ServiceRatesService {
   async remove(id: string) {
     const existing = await this.prisma.serviceRate.findUnique({
       where: { id },
-      select: {
-        id: true,
-        payer: true,
+      include: {
         service: {
           select: {
             serviceCode: true,
@@ -311,6 +369,7 @@ export class ServiceRatesService {
         payer: existing.payer,
         serviceCode: existing.service.serviceCode,
         serviceName: existing.service.serviceName,
+        effectiveFrom: existing.effectiveFrom,
       },
     };
   }

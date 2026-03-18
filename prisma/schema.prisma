@@ -322,7 +322,7 @@ model Service {
  * ServiceRate = bảng rate setup cho billing
  * - Hiện tại chỉ dùng payer = ODP
  * - Service phải bám đúng bảng Service BAC đang dùng
- * - Mỗi payer + service chỉ có 1 rate hiện hành
+ * - Cho phép nhiều rate theo thời gian cho cùng 1 service
  */
 model ServiceRate {
   id String @id @default(cuid())
@@ -333,14 +333,25 @@ model ServiceRate {
   service   Service @relation(fields: [serviceId], references: [id], onDelete: Restrict)
 
   rate Float
+
+  // ✅ NEW: production-ready fields
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  isActive      Boolean @default(true)
+
   notes String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([payer, serviceId], name: "service_rate_payer_service_unique")
+  // Không cho trùng cùng 1 service + payer + effectiveFrom
+  @@unique([payer, serviceId, effectiveFrom], name: "service_rate_payer_service_effective_from_unique")
+
   @@index([payer])
   @@index([serviceId])
+  @@index([payer, serviceId])
+  @@index([payer, serviceId, effectiveFrom])
+  @@index([payer, serviceId, isActive])
   @@map("ServiceRate")
 }
 
@@ -981,12 +992,9 @@ model OfficeWeeklyApproval {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // ✅ Keep the compound unique name to match service code:
-  // where: { staffId_weekStart_weekEnd: { ... } }
   @@unique([staffId, weekStart, weekEnd], name: "staffId_weekStart_weekEnd")
   @@index([weekStart, weekEnd])
   @@index([status])
-  // ✅ FIX: Point Prisma to the correct table
   @@map("OfficeWeeklyApproval")
 }
 
@@ -1155,13 +1163,11 @@ model HealthIncidentReport {
   @@index([staffId, date])
   @@index([individualId, date])
 
-  // ✅ NEW: helpful indexes for report filtering
   @@index([shiftId])
   @@index([ciAssignedAt])
   @@index([investigatedAt])
   @@index([closedAt])
 
-  // ✅ map đúng table DB trong Supabase (case-sensitive)
   @@map("HealthIncidentReport")
 }
 
