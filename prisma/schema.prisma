@@ -1,4 +1,4 @@
-// prisma/schema.prisma
+// bac-hms/bac-api/prisma/schema.prisma
 
 generator client {
   provider = "prisma-client-js"
@@ -25,6 +25,15 @@ enum IndividualStatus {
 // Hiện tại BAC chỉ dùng ODP
 enum BillingPayer {
   ODP
+}
+
+// ✅ NEW: Claim status
+enum ClaimStatus {
+  DRAFT
+  SUBMITTED
+  PAID
+  DENIED
+  VOID
 }
 
 model Individual {
@@ -137,6 +146,11 @@ model Individual {
   visits                  Visit[]
   ispAllocations          ISPAllocation[]
   healthIncidentReports   HealthIncidentReport[]
+
+  // ✅ ADD: Authorizations / Claims
+  authorizations Authorization[]
+  claims         Claim[]
+  claimItems     ClaimItem[]
 
   // ISP & BSP form (lưu toàn bộ dữ liệu form dạng JSON)
   ispBspForm IspBspForm?
@@ -316,6 +330,76 @@ model Service {
   visits               Visit[]
   ispAllocations       ISPAllocation[]
   serviceRates         ServiceRate[]
+
+  // ✅ ADD: Authorizations / Claims
+  authorizations Authorization[]
+  claims         Claim[]
+  claimItems     ClaimItem[]
+}
+
+/**
+ * Authorization = quản lý ủy quyền dịch vụ theo Individual + Service
+ * NOTE:
+ * giữ kiểu payer = String để tương thích DB hiện tại bên web/schema đang dùng
+ */
+model Authorization {
+  id String @id @default(cuid())
+
+  authorizationNumber String
+
+  individualId String
+  serviceId    String
+
+  payer     String
+  eventCode String?
+  format    String
+  program   String?
+
+  modifier1 String?
+  modifier2 String?
+  modifier3 String?
+  modifier4 String?
+
+  startDate DateTime
+  endDate   DateTime
+
+  maximum   Float @default(0)
+  used      Float @default(0)
+  remaining Float @default(0)
+
+  // historical snapshot fields
+  snapshotThroughDate DateTime?
+  manualUsed          Float @default(0)
+  manualMissed        Float @default(0)
+
+  status String @default("PENDING")
+  source String @default("MANUAL")
+
+  voided   Boolean @default(false)
+  comments String?
+
+  intervalType  String?
+  intervalLimit Float?
+  intervalStart DateTime?
+  intervalEnd   DateTime?
+
+  serviceCode String
+  serviceName String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  individual Individual @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  service    Service    @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  claims     Claim[]
+  claimItems ClaimItem[]
+
+  @@unique([individualId, authorizationNumber, serviceId])
+  @@index([individualId, startDate])
+  @@index([serviceId, startDate])
+  @@index([status])
+  @@index([authorizationNumber])
 }
 
 /**
@@ -524,10 +608,16 @@ model Visit {
 
   reviewedAt DateTime?
 
+  // ✅ ADD: lock after claim creation
+  isClaimLocked Boolean  @default(false)
+  claimedAt     DateTime?
+
   scheduleShift ScheduleShift? @relation(fields: [scheduleShiftId], references: [id])
   individual    Individual     @relation(fields: [individualId], references: [id], onDelete: Cascade)
   dsp           Employee       @relation("VisitDSP", fields: [dspId], references: [id])
   service       Service?       @relation(fields: [serviceId], references: [id])
+
+  claimItem ClaimItem?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -535,6 +625,93 @@ model Visit {
   @@index([scheduleShiftId])
   @@index([dspId, checkInAt])
   @@index([individualId, checkInAt])
+  @@index([isClaimLocked])
+}
+
+// =====================================================
+//  CLAIMS
+// =====================================================
+
+model Claim {
+  id          String      @id @default(cuid())
+  claimNumber String      @unique
+  status      ClaimStatus @default(DRAFT)
+
+  payer BillingPayer @default(ODP)
+
+  individualId    String
+  authorizationId String?
+  serviceId       String
+
+  serviceDateFrom DateTime?
+  serviceDateTo   DateTime?
+
+  itemCount   Int     @default(0)
+  totalUnits  Decimal @db.Decimal(10, 2) @default(0)
+  totalAmount Decimal @db.Decimal(12, 2) @default(0)
+
+  submittedAt DateTime?
+  paidAt      DateTime?
+  deniedAt    DateTime?
+  voidedAt    DateTime?
+
+  submitNote   String?
+  denialReason String?
+  internalNote String?
+
+  createdById String?
+  updatedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  individual    Individual     @relation(fields: [individualId], references: [id], onDelete: Restrict)
+  authorization Authorization? @relation(fields: [authorizationId], references: [id], onDelete: SetNull)
+  service       Service        @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  items ClaimItem[]
+
+  @@index([status])
+  @@index([payer, status])
+  @@index([individualId])
+  @@index([authorizationId])
+  @@index([serviceId])
+  @@index([serviceDateFrom, serviceDateTo])
+}
+
+model ClaimItem {
+  id String @id @default(cuid())
+
+  claimId String
+  visitId String @unique
+
+  individualId    String
+  authorizationId String?
+  serviceId       String
+
+  visitDate DateTime
+  units     Decimal @db.Decimal(10, 2)
+  rate      Decimal @db.Decimal(10, 2)
+  amount    Decimal @db.Decimal(12, 2)
+
+  startTime DateTime?
+  endTime   DateTime?
+
+  note String?
+
+  createdAt DateTime @default(now())
+
+  claim         Claim          @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  visit         Visit          @relation(fields: [visitId], references: [id], onDelete: Restrict)
+  individual    Individual     @relation(fields: [individualId], references: [id], onDelete: Restrict)
+  authorization Authorization? @relation(fields: [authorizationId], references: [id], onDelete: SetNull)
+  service       Service        @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  @@index([claimId])
+  @@index([individualId])
+  @@index([authorizationId])
+  @@index([serviceId])
+  @@index([visitDate])
 }
 
 // =====================================================

@@ -208,12 +208,26 @@ function uniqStrings(arr: Array<string | null | undefined>): string[] {
   return out;
 }
 
+function getShiftLocalDate(shift: any, fallbackDate?: string): string {
+  const fromScheduleDate = shift?.scheduleDate
+    ? DateTime.fromJSDate(shift.scheduleDate).setZone(TZ).toISODate()
+    : null;
+
+  if (fromScheduleDate) return fromScheduleDate;
+
+  const fromPlannedStart = shift?.plannedStart
+    ? DateTime.fromJSDate(shift.plannedStart).setZone(TZ).toISODate()
+    : null;
+
+  return fromPlannedStart || fallbackDate || DateTime.now().setZone(TZ).toISODate()!;
+}
+
 function pickRelevantVisitsForMobileShift(params: {
   visits: any[];
   staffIds?: string[];
-  date: string;
+  shiftDate: string;
 }): any[] {
-  const { visits, staffIds, date } = params;
+  const { visits, staffIds, shiftDate } = params;
 
   const visitsFiltered = staffIds?.length
     ? visits.filter((v) => staffIds.includes(v.dspId))
@@ -227,19 +241,20 @@ function pickRelevantVisitsForMobileShift(params: {
     const localDateStr = DateTime.fromJSDate(v.checkInAt)
       .setZone(TZ)
       .toISODate();
-    return localDateStr === date;
+    return localDateStr === shiftDate;
   });
 }
 
 function mapShiftToMobileShift(params: {
   shift: any;
   staffIds: string[];
-  date: string;
+  date?: string;
 }): MobileShift {
   const { shift, staffIds, date } = params;
   const individual = shift.individual;
   const service = shift.service;
   const visits = shift.visits ?? [];
+  const shiftDate = getShiftLocalDate(shift, date);
 
   let status: ShiftStatus = 'NOT_STARTED';
   switch (shift.status) {
@@ -255,7 +270,7 @@ function mapShiftToMobileShift(params: {
   const visitsForDsp = pickRelevantVisitsForMobileShift({
     visits,
     staffIds,
-    date,
+    shiftDate,
   });
 
   let visitStart: string | null = null;
@@ -285,7 +300,7 @@ function mapShiftToMobileShift(params: {
 
   return {
     id: shift.id,
-    date,
+    date: shiftDate,
     individualId: individual.id,
     individualName: `${individual.firstName} ${individual.lastName}`.trim(),
     individualDob: individual.dob ?? '',
@@ -305,13 +320,14 @@ function mapShiftToMobileShift(params: {
 
 function mapShiftToMobileShiftForClientDetail(params: {
   shift: any;
-  date: string;
+  date?: string;
   staffIds?: string[];
 }): MobileShift {
   const { shift, date, staffIds } = params;
   const individual = shift.individual;
   const service = shift.service;
   const visits = shift.visits ?? [];
+  const shiftDate = getShiftLocalDate(shift, date);
 
   let status: ShiftStatus = 'NOT_STARTED';
   switch (shift.status) {
@@ -327,7 +343,7 @@ function mapShiftToMobileShiftForClientDetail(params: {
   const visitsFiltered = pickRelevantVisitsForMobileShift({
     visits,
     staffIds,
-    date,
+    shiftDate,
   });
 
   let visitStart: string | null = null;
@@ -357,7 +373,7 @@ function mapShiftToMobileShiftForClientDetail(params: {
 
   return {
     id: shift.id,
-    date,
+    date: shiftDate,
     individualId: individual.id,
     individualName: `${individual.firstName} ${individual.lastName}`.trim(),
     individualDob: individual.dob ?? '',
@@ -963,13 +979,23 @@ export class MobileService {
       staffIdRaw: staffId,
     });
 
-    const serviceDate = DateTime.fromISO(date, { zone: TZ })
-      .startOf('day')
-      .toJSDate();
+    const shift = await this.prisma.scheduleShift.findUnique({
+      where: { id: shiftId },
+      select: {
+        id: true,
+        scheduleDate: true,
+        plannedStart: true,
+        serviceId: true,
+      },
+    });
+
+    const serviceDate =
+      shift?.scheduleDate ??
+      DateTime.fromISO(date, { zone: TZ }).startOf('day').toJSDate();
 
     const visit = await this.prisma.visit.findFirst({
       where: { scheduleShiftId: shiftId, dspId: { in: staffIds } },
-      orderBy: { checkInAt: 'asc' },
+      orderBy: { checkInAt: 'desc' },
     });
 
     const service = await this.prisma.service.findFirst({
@@ -1002,6 +1028,10 @@ export class MobileService {
 
     const computedPayload: any = {
       ...payload,
+      date: getShiftLocalDate(
+        { scheduleDate: shift?.scheduleDate, plannedStart: shift?.plannedStart },
+        date,
+      ),
       totalH,
       billableUnits,
       lostMinutes: lostMinutes > 0 ? String(lostMinutes) : '',
@@ -1020,7 +1050,7 @@ export class MobileService {
         shiftId,
         individualId,
         staffId: staffTechId,
-        serviceId: service?.id ?? null,
+        serviceId: service?.id ?? shift?.serviceId ?? null,
         visitId: visit?.id ?? null,
         date: serviceDate,
 
