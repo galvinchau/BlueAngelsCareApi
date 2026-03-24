@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+// bac-hms/bac-api/src/visited-maintenance/visited-maintenance.service.ts
+import { Injectable, NotFoundException } from '@nestjs/common';
 import {
   BillingPayer,
   ScheduleStatus,
@@ -74,6 +75,59 @@ function roundMoney(value: number) {
   return Math.round(value * 100) / 100;
 }
 
+function formatFullAddress(params: {
+  address1?: string | null;
+  address2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+}) {
+  const line1 = String(params.address1 || '').trim();
+  const line2 = String(params.address2 || '').trim();
+  const city = String(params.city || '').trim();
+  const state = String(params.state || '').trim();
+  const zip = String(params.zip || '').trim();
+
+  const lastLine = [city, state].filter(Boolean).join(', ');
+  const lastLineWithZip = zip
+    ? lastLine
+      ? `${lastLine} ${zip}`
+      : zip
+    : lastLine;
+
+  return [line1, line2, lastLineWithZip].filter(Boolean).join(', ');
+}
+
+function toRadians(deg: number) {
+  return (deg * Math.PI) / 180;
+}
+
+function haversineMiles(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number,
+): number {
+  const earthRadiusMiles = 3958.7613;
+  const dLat = toRadians(lat2 - lat1);
+  const dLng = toRadians(lng2 - lng1);
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusMiles * c;
+}
+
+type GeocodeResult = {
+  lat: number;
+  lng: number;
+};
+
 @Injectable()
 export class VisitedMaintenanceService {
   constructor(private readonly prisma: PrismaService) {}
@@ -145,6 +199,43 @@ export class VisitedMaintenanceService {
     }
 
     return null;
+  }
+
+  private async geocodeAddress(address: string): Promise<GeocodeResult | null> {
+    const q = String(address || '').trim();
+    if (!q) return null;
+
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(
+        q,
+      )}`;
+
+      const res = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'BAC-HMS/1.0 (Visited Maintenance GPS)',
+        },
+      });
+
+      if (!res.ok) return null;
+
+      const data = (await res.json()) as Array<{
+        lat?: string;
+        lon?: string;
+      }>;
+
+      const first = Array.isArray(data) ? data[0] : null;
+      const lat = Number(first?.lat);
+      const lng = Number(first?.lon);
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return null;
+      }
+
+      return { lat, lng };
+    } catch {
+      return null;
+    }
   }
 
   async listVisits() {
@@ -318,6 +409,159 @@ export class VisitedMaintenanceService {
         reviewed: Boolean(visit.reviewedAt),
       };
     });
+  }
+
+  async getVisitGps(id: string) {
+    const visit = await this.prisma.visit.findUnique({
+      where: { id },
+      include: {
+        individual: {
+          select: {
+            id: true,
+            firstName: true,
+            middleName: true,
+            lastName: true,
+            address1: true,
+            address2: true,
+            city: true,
+            state: true,
+            zip: true,
+          },
+        },
+        dsp: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        service: {
+          select: {
+            id: true,
+            serviceCode: true,
+            serviceName: true,
+          },
+        },
+        scheduleShift: {
+          select: {
+            id: true,
+            scheduleDate: true,
+            plannedStart: true,
+            plannedEnd: true,
+            status: true,
+            cancelReason: true,
+          },
+        },
+      },
+    });
+
+    if (!visit) {
+      throw new NotFoundException('Visit not found');
+    }
+
+    const individualName = buildFullName([
+      visit.individual.firstName,
+      visit.individual.middleName,
+      visit.individual.lastName,
+    ]);
+
+    const dspName = buildFullName([visit.dsp.firstName, visit.dsp.lastName]);
+
+    const fullAddress = formatFullAddress({
+      address1: visit.individual.address1,
+      address2: visit.individual.address2,
+      city: visit.individual.city,
+      state: visit.individual.state,
+      zip: visit.individual.zip,
+    });
+
+    const homeCoords = fullAddress
+      ? await this.geocodeAddress(fullAddress)
+      : null;
+
+    const visitLat =
+      typeof visit.gpsLatitude === 'number' ? visit.gpsLatitude : null;
+    const visitLng =
+      typeof visit.gpsLongitude === 'number' ? visit.gpsLongitude : null;
+
+    const distanceMiles =
+      homeCoords &&
+      visitLat != null &&
+      visitLng != null
+        ? haversineMiles(homeCoords.lat, homeCoords.lng, visitLat, visitLng)
+        : null;
+
+    let locationStatus: 'ON_SITE' | 'NEARBY' | 'FAR' | 'UNKNOWN' = 'UNKNOWN';
+    if (distanceMiles != null) {
+      if (distanceMiles <= 0.25) {
+        locationStatus = 'ON_SITE';
+      } else if (distanceMiles <= 1) {
+        locationStatus = 'NEARBY';
+      } else {
+        locationStatus = 'FAR';
+      }
+    }
+
+    return {
+      visitId: visit.id,
+      date:
+        toIsoDateInNewYork(visit.scheduleShift?.scheduleDate) ||
+        toIsoDateInNewYork(visit.checkInAt) ||
+        '',
+      status: this.mapStatus({
+        shiftStatus: visit.scheduleShift?.status,
+        checkInAt: visit.checkInAt,
+        checkOutAt: visit.checkOutAt,
+      }),
+      cancelReason: visit.scheduleShift?.cancelReason ?? null,
+
+      individual: {
+        id: visit.individual.id,
+        name: individualName,
+        address1: visit.individual.address1 ?? null,
+        address2: visit.individual.address2 ?? null,
+        city: visit.individual.city ?? null,
+        state: visit.individual.state ?? null,
+        zip: visit.individual.zip ?? null,
+        fullAddress: fullAddress || null,
+        homeLat: homeCoords?.lat ?? null,
+        homeLng: homeCoords?.lng ?? null,
+      },
+
+      dsp: {
+        id: visit.dsp.id,
+        name: dspName,
+      },
+
+      service: {
+        id: visit.service?.id ?? null,
+        code: visit.service?.serviceCode ?? null,
+        name: visit.service?.serviceName ?? null,
+      },
+
+      schedule: {
+        shiftId: visit.scheduleShift?.id ?? null,
+        plannedDate: toIsoDateInNewYork(visit.scheduleShift?.scheduleDate) || null,
+        plannedStart: toHmInNewYork(visit.scheduleShift?.plannedStart),
+        plannedEnd: toHmInNewYork(visit.scheduleShift?.plannedEnd),
+      },
+
+      visit: {
+        checkIn: toHmInNewYork(visit.checkInAt),
+        checkOut: toHmInNewYork(visit.checkOutAt),
+        gpsLatitude: visitLat,
+        gpsLongitude: visitLng,
+        source: this.mapSource(visit.source),
+      },
+
+      gpsSummary: {
+        hasVisitGps: visitLat != null && visitLng != null,
+        hasHomeCoords: Boolean(homeCoords),
+        distanceMiles:
+          distanceMiles != null ? roundMoney(distanceMiles) : null,
+        locationStatus,
+      },
+    };
   }
 
   async markReviewed(id: string) {

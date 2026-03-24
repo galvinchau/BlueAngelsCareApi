@@ -13,7 +13,7 @@ import {
 import type {
   MobileDailyNotePayload,
   MobileIndividualLite,
-  MobileHealthIncidentPayload, // ✅ NEW
+  MobileHealthIncidentPayload,
 } from './mobile.service';
 
 // Import class service như bình thường
@@ -45,15 +45,19 @@ function parseMMDDYYYY(
 ): { mm: number; dd: number; yyyy: number } | null {
   if (!isNonEmptyString(v)) return null;
   const s = v.trim();
+
   // Accept "MM/DD/YYYY" (with possible single digit M/D)
   const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (!m) return null;
+
   const mm = Number(m[1]);
   const dd = Number(m[2]);
   const yyyy = Number(m[3]);
+
   if (mm < 1 || mm > 12) return null;
   if (dd < 1 || dd > 31) return null;
   if (yyyy < 1900 || yyyy > 3000) return null;
+
   return { mm, dd, yyyy };
 }
 
@@ -249,8 +253,26 @@ export class MobileController {
     @Param('id') shiftId: string,
     @Body('staffId') staffId: string,
     @Body('clientTime') clientTime?: string,
+    @Body('gpsLatitude') gpsLatitude?: number,
+    @Body('gpsLongitude') gpsLongitude?: number,
   ) {
-    return this.mobileService.checkInShift(shiftId, staffId, clientTime);
+    console.log('[MobileController][check-in] body =', {
+      shiftId,
+      staffId,
+      clientTime,
+      gpsLatitude,
+      gpsLongitude,
+      gpsLatitudeType: typeof gpsLatitude,
+      gpsLongitudeType: typeof gpsLongitude,
+    });
+
+    return this.mobileService.checkInShift(
+      shiftId,
+      staffId,
+      clientTime,
+      gpsLatitude,
+      gpsLongitude,
+    );
   }
 
   /**
@@ -261,7 +283,25 @@ export class MobileController {
     @Param('id') shiftId: string,
     @Body('staffId') staffId: string,
     @Body('clientTime') clientTime?: string,
+    @Body('gpsLatitude') gpsLatitude?: number,
+    @Body('gpsLongitude') gpsLongitude?: number,
   ) {
-    return this.mobileService.checkOutShift(shiftId, staffId, clientTime);
+    console.log('[MobileController][check-out] body =', {
+      shiftId,
+      staffId,
+      clientTime,
+      gpsLatitude,
+      gpsLongitude,
+      gpsLatitudeType: typeof gpsLatitude,
+      gpsLongitudeType: typeof gpsLongitude,
+    });
+
+    return this.mobileService.checkOutShift(
+      shiftId,
+      staffId,
+      clientTime,
+      gpsLatitude,
+      gpsLongitude,
+    );
   }
 }

@@ -157,6 +157,13 @@ function minutesToUnits(mins: number): number {
   return Math.ceil(mins / 15);
 }
 
+function toNullableNumber(v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null;
+
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function formatAddress(ind: Individual): string {
   const parts = [
     ind.address1 ?? '',
@@ -1174,6 +1181,8 @@ export class MobileService {
     shiftId: string,
     staffId: string,
     clientTime?: string,
+    gpsLatitude?: number,
+    gpsLongitude?: number,
   ): Promise<CheckInOutResponse> {
     const identity = await this.resolveStaffIdentity(staffId);
     if (!identity) {
@@ -1188,6 +1197,20 @@ export class MobileService {
     });
 
     await this.ensureNotCheckedInOfficeTimeKeeping(staffTechId);
+
+    const lat = toNullableNumber(gpsLatitude);
+    const lng = toNullableNumber(gpsLongitude);
+
+    console.log('[MobileService][check-in] raw gps =', {
+      gpsLatitude,
+      gpsLongitude,
+      gpsLatitudeType: typeof gpsLatitude,
+      gpsLongitudeType: typeof gpsLongitude,
+    });
+    console.log('[MobileService][check-in] normalized gps =', {
+      lat,
+      lng,
+    });
 
     const checkInAt = clientTime
       ? DateTime.fromISO(clientTime, { setZone: true }).setZone(TZ).toJSDate()
@@ -1216,6 +1239,41 @@ export class MobileService {
     });
 
     if (existingOpen) {
+      if (
+        (lat !== null || lng !== null) &&
+        (existingOpen.gpsLatitude == null || existingOpen.gpsLongitude == null)
+      ) {
+        const updatedExisting = await this.prisma.visit.update({
+          where: { id: existingOpen.id },
+          data: {
+            gpsLatitude:
+              existingOpen.gpsLatitude == null ? lat : existingOpen.gpsLatitude,
+            gpsLongitude:
+              existingOpen.gpsLongitude == null ? lng : existingOpen.gpsLongitude,
+          },
+          select: {
+            id: true,
+            gpsLatitude: true,
+            gpsLongitude: true,
+            checkInAt: true,
+          },
+        });
+
+        console.log('[MobileService][check-in] updated existing open visit =', {
+          id: updatedExisting.id,
+          gpsLatitude: updatedExisting.gpsLatitude,
+          gpsLongitude: updatedExisting.gpsLongitude,
+        });
+      } else {
+        console.log('[MobileService][check-in] existing open visit found but GPS not updated =', {
+          existingVisitId: existingOpen.id,
+          existingGpsLatitude: existingOpen.gpsLatitude,
+          existingGpsLongitude: existingOpen.gpsLongitude,
+          lat,
+          lng,
+        });
+      }
+
       if (shift.status !== ScheduleStatus.IN_PROGRESS) {
         await this.prisma.scheduleShift.update({
           where: { id: shiftId },
@@ -1244,7 +1302,20 @@ export class MobileService {
         serviceId: shift.serviceId ?? null,
         checkInAt,
         source: VisitSource.MOBILE,
+        gpsLatitude: lat,
+        gpsLongitude: lng,
       },
+      select: {
+        id: true,
+        gpsLatitude: true,
+        gpsLongitude: true,
+      },
+    });
+
+    console.log('[MobileService][check-in] created visit =', {
+      id: visit.id,
+      gpsLatitude: visit.gpsLatitude,
+      gpsLongitude: visit.gpsLongitude,
     });
 
     await this.prisma.scheduleShift.update({
@@ -1269,6 +1340,8 @@ export class MobileService {
     shiftId: string,
     staffId: string,
     clientTime?: string,
+    gpsLatitude?: number,
+    gpsLongitude?: number,
   ): Promise<CheckInOutResponse> {
     const identity = await this.resolveStaffIdentity(staffId);
     if (!identity) {
@@ -1280,6 +1353,20 @@ export class MobileService {
       techId: staffTechId,
       employeeId: identity.employeeId ?? null,
       staffIdRaw: staffId,
+    });
+
+    const lat = toNullableNumber(gpsLatitude);
+    const lng = toNullableNumber(gpsLongitude);
+
+    console.log('[MobileService][check-out] raw gps =', {
+      gpsLatitude,
+      gpsLongitude,
+      gpsLatitudeType: typeof gpsLatitude,
+      gpsLongitudeType: typeof gpsLongitude,
+    });
+    console.log('[MobileService][check-out] normalized gps =', {
+      lat,
+      lng,
     });
 
     const checkOutAt = clientTime
@@ -1298,24 +1385,48 @@ export class MobileService {
 
     if (!shift) throw new NotFoundException('Shift not found');
 
-    const updated = await this.prisma.visit.updateMany({
+    const openVisit = await this.prisma.visit.findFirst({
       where: {
         scheduleShiftId: shiftId,
         dspId: { in: staffIds },
         checkOutAt: null,
       },
-      data: { checkOutAt },
+      orderBy: { checkInAt: 'desc' },
+      select: {
+        id: true,
+        gpsLatitude: true,
+        gpsLongitude: true,
+      },
     });
 
     let timesheetId: string;
 
-    if (updated.count > 0) {
-      const latest = await this.prisma.visit.findFirst({
-        where: { scheduleShiftId: shiftId, dspId: { in: staffIds } },
-        orderBy: { checkInAt: 'desc' },
-        select: { id: true },
+    if (openVisit?.id) {
+      const updatedVisit = await this.prisma.visit.update({
+        where: { id: openVisit.id },
+        data: {
+          checkOutAt,
+          gpsLatitude:
+            openVisit.gpsLatitude == null ? lat : openVisit.gpsLatitude,
+          gpsLongitude:
+            openVisit.gpsLongitude == null ? lng : openVisit.gpsLongitude,
+        },
+        select: {
+          id: true,
+          gpsLatitude: true,
+          gpsLongitude: true,
+          checkOutAt: true,
+        },
       });
-      timesheetId = latest?.id ?? 'UNKNOWN';
+
+      console.log('[MobileService][check-out] updated open visit =', {
+        id: updatedVisit.id,
+        gpsLatitude: updatedVisit.gpsLatitude,
+        gpsLongitude: updatedVisit.gpsLongitude,
+        checkOutAt: updatedVisit.checkOutAt,
+      });
+
+      timesheetId = openVisit.id;
     } else {
       const created = await this.prisma.visit.create({
         data: {
@@ -1326,9 +1437,22 @@ export class MobileService {
           checkInAt: checkOutAt,
           checkOutAt,
           source: VisitSource.MOBILE,
+          gpsLatitude: lat,
+          gpsLongitude: lng,
         },
-        select: { id: true },
+        select: {
+          id: true,
+          gpsLatitude: true,
+          gpsLongitude: true,
+        },
       });
+
+      console.log('[MobileService][check-out] created visit on check-out =', {
+        id: created.id,
+        gpsLatitude: created.gpsLatitude,
+        gpsLongitude: created.gpsLongitude,
+      });
+
       timesheetId = created.id;
     }
 
