@@ -1,5 +1,5 @@
 // ======================================================
-//  src/mobile/mobile.service.ts
+//  bac-hms/bac-api/src/mobile/mobile.service.ts
 // ======================================================
 
 import {
@@ -117,6 +117,35 @@ export interface CheckInOutResponse {
   staffId: string;
   time: string;
   timesheetId: string;
+  awakeMonitoring?: {
+    enabled: boolean;
+    status: string | null;
+    intervalMinutes: number | null;
+    graceMinutes: number | null;
+    lastConfirmedAt: string | null;
+    nextDueAt: string | null;
+    deadlineAt: string | null;
+    autoCheckedOutAt: string | null;
+    autoCheckoutReason: string | null;
+  };
+}
+
+export interface AwakeConfirmResponse {
+  status: 'OK';
+  visitId: string;
+  staffId: string;
+  confirmedAt: string;
+  awakeMonitoring: {
+    enabled: boolean;
+    status: string | null;
+    intervalMinutes: number | null;
+    graceMinutes: number | null;
+    lastConfirmedAt: string | null;
+    nextDueAt: string | null;
+    deadlineAt: string | null;
+    autoCheckedOutAt: string | null;
+    autoCheckoutReason: string | null;
+  };
 }
 
 const TZ = 'America/New_York';
@@ -423,6 +452,100 @@ function isOfficeRole(role?: string | null) {
   );
 }
 
+function buildAwakeMonitoringCreateData(checkInAt: Date, enabled?: boolean) {
+  if (!enabled) {
+    return {
+      awakeMonitoringEnabled: false,
+      awakeIntervalMinutes: 60,
+      awakeGraceMinutes: 10,
+      awakeStatus: 'OFF',
+      lastAwakeConfirmedAt: null,
+      nextAwakeConfirmDueAt: null,
+      awakeDeadlineAt: null,
+      autoCheckedOutAt: null,
+      autoCheckoutReason: null,
+    };
+  }
+
+  const intervalMinutes = 60;
+  const graceMinutes = 10;
+
+  const nextDueAt = new Date(
+    checkInAt.getTime() + intervalMinutes * 60 * 1000,
+  );
+  const deadlineAt = new Date(
+    nextDueAt.getTime() + graceMinutes * 60 * 1000,
+  );
+
+  return {
+    awakeMonitoringEnabled: true,
+    awakeIntervalMinutes: intervalMinutes,
+    awakeGraceMinutes: graceMinutes,
+    awakeStatus: 'ACTIVE',
+    lastAwakeConfirmedAt: checkInAt,
+    nextAwakeConfirmDueAt: nextDueAt,
+    awakeDeadlineAt: deadlineAt,
+    autoCheckedOutAt: null,
+    autoCheckoutReason: null,
+  };
+}
+
+function buildAwakeMonitoringConfirmData(
+  confirmedAt: Date,
+  intervalMinutes?: number | null,
+  graceMinutes?: number | null,
+) {
+  const safeInterval =
+    typeof intervalMinutes === 'number' && intervalMinutes > 0
+      ? intervalMinutes
+      : 60;
+
+  const safeGrace =
+    typeof graceMinutes === 'number' && graceMinutes > 0 ? graceMinutes : 10;
+
+  const nextDueAt = new Date(
+    confirmedAt.getTime() + safeInterval * 60 * 1000,
+  );
+  const deadlineAt = new Date(
+    nextDueAt.getTime() + safeGrace * 60 * 1000,
+  );
+
+  return {
+    awakeStatus: 'ACTIVE',
+    lastAwakeConfirmedAt: confirmedAt,
+    nextAwakeConfirmDueAt: nextDueAt,
+    awakeDeadlineAt: deadlineAt,
+  };
+}
+
+function mapAwakeMonitoringResponse(visit: any) {
+  return {
+    enabled: Boolean(visit?.awakeMonitoringEnabled),
+    status: visit?.awakeStatus ?? null,
+    intervalMinutes:
+      typeof visit?.awakeIntervalMinutes === 'number'
+        ? visit.awakeIntervalMinutes
+        : null,
+    graceMinutes:
+      typeof visit?.awakeGraceMinutes === 'number'
+        ? visit.awakeGraceMinutes
+        : null,
+    lastConfirmedAt: visit?.lastAwakeConfirmedAt
+      ? new Date(visit.lastAwakeConfirmedAt).toISOString()
+      : null,
+    nextDueAt: visit?.nextAwakeConfirmDueAt
+      ? new Date(visit.nextAwakeConfirmDueAt).toISOString()
+      : null,
+    deadlineAt: visit?.awakeDeadlineAt
+      ? new Date(visit.awakeDeadlineAt).toISOString()
+      : null,
+    autoCheckedOutAt: visit?.autoCheckedOutAt
+      ? new Date(visit.autoCheckedOutAt).toISOString()
+      : null,
+    autoCheckoutReason: visit?.autoCheckoutReason ?? null,
+  };
+}
+
 @Injectable()
 export class MobileService {
   constructor(
@@ -464,6 +587,16 @@ export class MobileService {
       identity.employeeId,
       identity.staffIdRaw,
     ]);
+  }
+
+  private async findLatestOpenVisitForStaff(staffIds: string[]) {
+    return this.prisma.visit.findFirst({
+      where: {
+        dspId: { in: staffIds },
+        checkOutAt: null,
+      },
+      orderBy: { checkInAt: 'desc' },
+    });
   }
 
   private async ensureNotCheckedInOfficeTimeKeeping(staffTechId: string) {
@@ -640,7 +773,6 @@ export class MobileService {
             checkInAt: plannedStart,
             source: VisitSource.MOBILE,
           } as any,
-          select: { id: true },
         });
 
         return { shiftId: shift.id };
@@ -1183,6 +1315,7 @@ export class MobileService {
     clientTime?: string,
     gpsLatitude?: number,
     gpsLongitude?: number,
+    awakeMonitoringEnabled?: boolean,
   ): Promise<CheckInOutResponse> {
     const identity = await this.resolveStaffIdentity(staffId);
     if (!identity) {
@@ -1206,6 +1339,7 @@ export class MobileService {
       gpsLongitude,
       gpsLatitudeType: typeof gpsLatitude,
       gpsLongitudeType: typeof gpsLongitude,
+      awakeMonitoringEnabled,
     });
     console.log('[MobileService][check-in] normalized gps =', {
       lat,
@@ -1239,10 +1373,22 @@ export class MobileService {
     });
 
     if (existingOpen) {
-      if (
+      const shouldBackfillGps =
         (lat !== null || lng !== null) &&
-        (existingOpen.gpsLatitude == null || existingOpen.gpsLongitude == null)
-      ) {
+        (existingOpen.gpsLatitude == null || existingOpen.gpsLongitude == null);
+
+      const shouldEnableAwakeNow =
+        awakeMonitoringEnabled === true &&
+        existingOpen.awakeMonitoringEnabled !== true;
+
+      if (shouldBackfillGps || shouldEnableAwakeNow) {
+        const awakeData = shouldEnableAwakeNow
+          ? buildAwakeMonitoringCreateData(
+              existingOpen.checkInAt ?? checkInAt,
+              true,
+            )
+          : {};
+
         const updatedExisting = await this.prisma.visit.update({
           where: { id: existingOpen.id },
           data: {
@@ -1250,12 +1396,7 @@ export class MobileService {
               existingOpen.gpsLatitude == null ? lat : existingOpen.gpsLatitude,
             gpsLongitude:
               existingOpen.gpsLongitude == null ? lng : existingOpen.gpsLongitude,
-          },
-          select: {
-            id: true,
-            gpsLatitude: true,
-            gpsLongitude: true,
-            checkInAt: true,
+            ...awakeData,
           },
         });
 
@@ -1263,16 +1404,45 @@ export class MobileService {
           id: updatedExisting.id,
           gpsLatitude: updatedExisting.gpsLatitude,
           gpsLongitude: updatedExisting.gpsLongitude,
+          awakeMonitoringEnabled: updatedExisting.awakeMonitoringEnabled,
+          awakeStatus: updatedExisting.awakeStatus,
+          nextAwakeConfirmDueAt: updatedExisting.nextAwakeConfirmDueAt,
+          awakeDeadlineAt: updatedExisting.awakeDeadlineAt,
         });
-      } else {
-        console.log('[MobileService][check-in] existing open visit found but GPS not updated =', {
+
+        if (shift.status !== ScheduleStatus.IN_PROGRESS) {
+          await this.prisma.scheduleShift.update({
+            where: { id: shiftId },
+            data: {
+              status: ScheduleStatus.IN_PROGRESS,
+              actualDspId: shift.actualDspId ?? staffTechId,
+            },
+          });
+        }
+
+        return {
+          status: 'OK',
+          mode: 'IN',
+          shiftId,
+          staffId: staffTechId,
+          time: (updatedExisting.checkInAt ?? checkInAt).toISOString(),
+          timesheetId: updatedExisting.id,
+          awakeMonitoring: mapAwakeMonitoringResponse(updatedExisting),
+        };
+      }
+
+      console.log(
+        '[MobileService][check-in] existing open visit found but no update needed =',
+        {
           existingVisitId: existingOpen.id,
           existingGpsLatitude: existingOpen.gpsLatitude,
           existingGpsLongitude: existingOpen.gpsLongitude,
           lat,
           lng,
-        });
-      }
+          awakeMonitoringEnabledRequested: awakeMonitoringEnabled,
+          existingAwakeMonitoringEnabled: existingOpen.awakeMonitoringEnabled,
+        },
+      );
 
       if (shift.status !== ScheduleStatus.IN_PROGRESS) {
         await this.prisma.scheduleShift.update({
@@ -1291,8 +1461,14 @@ export class MobileService {
         staffId: staffTechId,
         time: (existingOpen.checkInAt ?? checkInAt).toISOString(),
         timesheetId: existingOpen.id,
+        awakeMonitoring: mapAwakeMonitoringResponse(existingOpen),
       };
     }
+
+    const awakeData = buildAwakeMonitoringCreateData(
+      checkInAt,
+      awakeMonitoringEnabled,
+    );
 
     const visit = await this.prisma.visit.create({
       data: {
@@ -1304,11 +1480,7 @@ export class MobileService {
         source: VisitSource.MOBILE,
         gpsLatitude: lat,
         gpsLongitude: lng,
-      },
-      select: {
-        id: true,
-        gpsLatitude: true,
-        gpsLongitude: true,
+        ...awakeData,
       },
     });
 
@@ -1316,6 +1488,10 @@ export class MobileService {
       id: visit.id,
       gpsLatitude: visit.gpsLatitude,
       gpsLongitude: visit.gpsLongitude,
+      awakeMonitoringEnabled: visit.awakeMonitoringEnabled,
+      awakeStatus: visit.awakeStatus,
+      nextAwakeConfirmDueAt: visit.nextAwakeConfirmDueAt,
+      awakeDeadlineAt: visit.awakeDeadlineAt,
     });
 
     await this.prisma.scheduleShift.update({
@@ -1333,6 +1509,80 @@ export class MobileService {
       staffId: staffTechId,
       time: checkInAt.toISOString(),
       timesheetId: visit.id,
+      awakeMonitoring: mapAwakeMonitoringResponse(visit),
+    };
+  }
+
+  async confirmAwake(
+    visitId: string,
+    staffId: string,
+  ): Promise<AwakeConfirmResponse> {
+    const identity = await this.resolveStaffIdentity(staffId);
+    if (!identity) {
+      throw new BadRequestException(`Employee not found: ${staffId}`);
+    }
+
+    const staffTechId = identity.techId;
+    const staffIds = this.staffVisitIds({
+      techId: staffTechId,
+      employeeId: identity.employeeId ?? null,
+      staffIdRaw: staffId,
+    });
+
+    const visit = await this.prisma.visit.findFirst({
+      where: {
+        id: visitId,
+        dspId: { in: staffIds },
+      },
+    });
+
+    if (!visit) {
+      throw new NotFoundException('Visit not found');
+    }
+
+    if (visit.checkOutAt) {
+      throw new BadRequestException(
+        'This visit is already checked out. Awake confirmation is no longer allowed.',
+      );
+    }
+
+    if (visit.awakeMonitoringEnabled !== true) {
+      throw new BadRequestException(
+        'Awake Monitoring is not enabled for this visit.',
+      );
+    }
+
+    const confirmedAt = DateTime.now().setZone(TZ).toJSDate();
+
+    const confirmData = buildAwakeMonitoringConfirmData(
+      confirmedAt,
+      visit.awakeIntervalMinutes,
+      visit.awakeGraceMinutes,
+    );
+
+    const updatedVisit = await this.prisma.visit.update({
+      where: { id: visit.id },
+      data: {
+        ...confirmData,
+      },
+    });
+
+    console.log('[MobileService][awake-confirm] updated visit =', {
+      id: updatedVisit.id,
+      dspId: updatedVisit.dspId,
+      awakeMonitoringEnabled: updatedVisit.awakeMonitoringEnabled,
+      awakeStatus: updatedVisit.awakeStatus,
+      lastAwakeConfirmedAt: updatedVisit.lastAwakeConfirmedAt,
+      nextAwakeConfirmDueAt: updatedVisit.nextAwakeConfirmDueAt,
+      awakeDeadlineAt: updatedVisit.awakeDeadlineAt,
+    });
+
+    return {
+      status: 'OK',
+      visitId: updatedVisit.id,
+      staffId: staffTechId,
+      confirmedAt: confirmedAt.toISOString(),
+      awakeMonitoring: mapAwakeMonitoringResponse(updatedVisit),
     };
   }
 
@@ -1385,19 +1635,37 @@ export class MobileService {
 
     if (!shift) throw new NotFoundException('Shift not found');
 
-    const openVisit = await this.prisma.visit.findFirst({
-      where: {
-        scheduleShiftId: shiftId,
-        dspId: { in: staffIds },
-        checkOutAt: null,
-      },
-      orderBy: { checkInAt: 'desc' },
-      select: {
-        id: true,
-        gpsLatitude: true,
-        gpsLongitude: true,
-      },
-    });
+    const latestOpenVisit = await this.findLatestOpenVisitForStaff(staffIds);
+
+    if (
+      latestOpenVisit?.id &&
+      latestOpenVisit.scheduleShiftId &&
+      latestOpenVisit.scheduleShiftId !== shiftId
+    ) {
+      console.warn('[MobileService][check-out] blocked mismatched shift checkout', {
+        requestedShiftId: shiftId,
+        actualOpenShiftId: latestOpenVisit.scheduleShiftId,
+        openVisitId: latestOpenVisit.id,
+        staffIdRaw: staffId,
+        staffTechId,
+      });
+
+      throw new BadRequestException(
+        'You are currently checked in on another shift. Please refresh and open the active overnight/current shift before checking out.',
+      );
+    }
+
+    const openVisit =
+      latestOpenVisit?.scheduleShiftId === shiftId
+        ? latestOpenVisit
+        : await this.prisma.visit.findFirst({
+            where: {
+              scheduleShiftId: shiftId,
+              dspId: { in: staffIds },
+              checkOutAt: null,
+            },
+            orderBy: { checkInAt: 'desc' },
+          });
 
     let timesheetId: string;
 
@@ -1410,12 +1678,6 @@ export class MobileService {
             openVisit.gpsLatitude == null ? lat : openVisit.gpsLatitude,
           gpsLongitude:
             openVisit.gpsLongitude == null ? lng : openVisit.gpsLongitude,
-        },
-        select: {
-          id: true,
-          gpsLatitude: true,
-          gpsLongitude: true,
-          checkOutAt: true,
         },
       });
 
@@ -1439,11 +1701,6 @@ export class MobileService {
           source: VisitSource.MOBILE,
           gpsLatitude: lat,
           gpsLongitude: lng,
-        },
-        select: {
-          id: true,
-          gpsLatitude: true,
-          gpsLongitude: true,
         },
       });
 

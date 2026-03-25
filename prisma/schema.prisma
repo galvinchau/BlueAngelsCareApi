@@ -608,6 +608,24 @@ model Visit {
 
   reviewedAt DateTime?
 
+    // =====================================================
+  //  AWAKE MONITORING (Phase 1)
+  // =====================================================
+
+  awakeMonitoringEnabled Boolean @default(false)
+
+  awakeIntervalMinutes Int @default(60)
+  awakeGraceMinutes    Int @default(10)
+
+  awakeStatus String?
+
+  lastAwakeConfirmedAt DateTime?
+  nextAwakeConfirmDueAt DateTime?
+  awakeDeadlineAt       DateTime?
+
+  autoCheckedOutAt  DateTime?
+  autoCheckoutReason String?
+
   // ✅ ADD: lock after claim creation
   isClaimLocked Boolean  @default(false)
   claimedAt     DateTime?

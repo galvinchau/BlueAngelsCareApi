@@ -35,6 +35,18 @@ type StartUnknownVisitBody = {
   clientTime?: string; // ISO string from device (optional)
 };
 
+type CheckInBody = {
+  staffId: string;
+  clientTime?: string;
+  gpsLatitude?: number;
+  gpsLongitude?: number;
+  awakeMonitoringEnabled?: boolean;
+};
+
+type AwakeConfirmBody = {
+  staffId: string;
+};
+
 // ---------- helpers (no deps) ----------
 function isNonEmptyString(v: any): v is string {
   return typeof v === 'string' && v.trim().length > 0;
@@ -251,19 +263,25 @@ export class MobileController {
   @Post('shifts/:id/check-in')
   checkIn(
     @Param('id') shiftId: string,
-    @Body('staffId') staffId: string,
-    @Body('clientTime') clientTime?: string,
-    @Body('gpsLatitude') gpsLatitude?: number,
-    @Body('gpsLongitude') gpsLongitude?: number,
+    @Body() body: CheckInBody,
   ) {
+    const staffId = String(body?.staffId ?? '').trim();
+    const clientTime = body?.clientTime;
+    const gpsLatitude = body?.gpsLatitude;
+    const gpsLongitude = body?.gpsLongitude;
+    const awakeMonitoringEnabled =
+      body?.awakeMonitoringEnabled === true;
+
     console.log('[MobileController][check-in] body =', {
       shiftId,
       staffId,
       clientTime,
       gpsLatitude,
       gpsLongitude,
+      awakeMonitoringEnabled,
       gpsLatitudeType: typeof gpsLatitude,
       gpsLongitudeType: typeof gpsLongitude,
+      awakeMonitoringEnabledType: typeof body?.awakeMonitoringEnabled,
     });
 
     return this.mobileService.checkInShift(
@@ -272,6 +290,7 @@ export class MobileController {
       clientTime,
       gpsLatitude,
       gpsLongitude,
+      awakeMonitoringEnabled,
     );
   }
 
@@ -303,5 +322,28 @@ export class MobileController {
       gpsLatitude,
       gpsLongitude,
     );
+  }
+
+  /**
+   * ✅ NEW
+   * POST /mobile/visits/:visitId/awake-confirm
+   */
+  @Post('visits/:visitId/awake-confirm')
+  confirmAwake(
+    @Param('visitId') visitId: string,
+    @Body() body: AwakeConfirmBody,
+  ) {
+    const staffId = String(body?.staffId ?? '').trim();
+
+    if (!staffId) {
+      throw new BadRequestException('Missing staffId');
+    }
+
+    console.log('[MobileController][awake-confirm] body =', {
+      visitId,
+      staffId,
+    });
+
+    return this.mobileService.confirmAwake(visitId, staffId);
   }
 }
