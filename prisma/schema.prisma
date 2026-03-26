@@ -550,6 +550,8 @@ model ScheduleShift {
   plannedStart DateTime // thời gian bắt đầu plan
   plannedEnd   DateTime // thời gian kết thúc plan
 
+  awakeMonitoringRequired Boolean @default(false)
+
   status ScheduleStatus @default(NOT_STARTED)
 
   cancelledBy  CancelledBy?

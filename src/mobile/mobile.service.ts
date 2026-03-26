@@ -40,6 +40,7 @@ export interface MobileShift {
   visitStart?: string | null;
   visitEnd?: string | null;
   outcomeText?: string | null;
+  awakeMonitoringRequired?: boolean;
 }
 
 export interface MobileDailyNotePayload {
@@ -351,6 +352,7 @@ function mapShiftToMobileShift(params: {
     visitStart,
     visitEnd,
     outcomeText: null,
+    awakeMonitoringRequired: shift.awakeMonitoringRequired === true,
   };
 }
 
@@ -424,6 +426,7 @@ function mapShiftToMobileShiftForClientDetail(params: {
     visitStart,
     visitEnd,
     outcomeText: null,
+    awakeMonitoringRequired: shift.awakeMonitoringRequired === true,
   };
 }
 
@@ -1315,7 +1318,7 @@ export class MobileService {
     clientTime?: string,
     gpsLatitude?: number,
     gpsLongitude?: number,
-    awakeMonitoringEnabled?: boolean,
+    awakeMonitoringEnabled?: boolean, // backward compatible only; ignored for policy
   ): Promise<CheckInOutResponse> {
     const identity = await this.resolveStaffIdentity(staffId);
     if (!identity) {
@@ -1339,7 +1342,7 @@ export class MobileService {
       gpsLongitude,
       gpsLatitudeType: typeof gpsLatitude,
       gpsLongitudeType: typeof gpsLongitude,
-      awakeMonitoringEnabled,
+      awakeMonitoringEnabledRequested: awakeMonitoringEnabled,
     });
     console.log('[MobileService][check-in] normalized gps =', {
       lat,
@@ -1358,10 +1361,13 @@ export class MobileService {
         serviceId: true,
         actualDspId: true,
         status: true,
+        awakeMonitoringRequired: true,
       },
     });
 
     if (!shift) throw new NotFoundException('Shift not found');
+
+    const awakeRequiredByOffice = shift.awakeMonitoringRequired === true;
 
     const existingOpen = await this.prisma.visit.findFirst({
       where: {
@@ -1378,7 +1384,7 @@ export class MobileService {
         (existingOpen.gpsLatitude == null || existingOpen.gpsLongitude == null);
 
       const shouldEnableAwakeNow =
-        awakeMonitoringEnabled === true &&
+        awakeRequiredByOffice === true &&
         existingOpen.awakeMonitoringEnabled !== true;
 
       if (shouldBackfillGps || shouldEnableAwakeNow) {
@@ -1408,6 +1414,7 @@ export class MobileService {
           awakeStatus: updatedExisting.awakeStatus,
           nextAwakeConfirmDueAt: updatedExisting.nextAwakeConfirmDueAt,
           awakeDeadlineAt: updatedExisting.awakeDeadlineAt,
+          awakeRequiredByOffice,
         });
 
         if (shift.status !== ScheduleStatus.IN_PROGRESS) {
@@ -1441,6 +1448,7 @@ export class MobileService {
           lng,
           awakeMonitoringEnabledRequested: awakeMonitoringEnabled,
           existingAwakeMonitoringEnabled: existingOpen.awakeMonitoringEnabled,
+          awakeRequiredByOffice,
         },
       );
 
@@ -1467,7 +1475,7 @@ export class MobileService {
 
     const awakeData = buildAwakeMonitoringCreateData(
       checkInAt,
-      awakeMonitoringEnabled,
+      awakeRequiredByOffice,
     );
 
     const visit = await this.prisma.visit.create({
@@ -1492,6 +1500,7 @@ export class MobileService {
       awakeStatus: visit.awakeStatus,
       nextAwakeConfirmDueAt: visit.nextAwakeConfirmDueAt,
       awakeDeadlineAt: visit.awakeDeadlineAt,
+      awakeRequiredByOffice,
     });
 
     await this.prisma.scheduleShift.update({

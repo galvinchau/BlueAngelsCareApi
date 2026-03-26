@@ -1,4 +1,5 @@
-// src/mobile/mobile.controller.ts
+// bac-hms/bac-api/src/mobile/mobile.controller.ts
+
 import {
   BadRequestException,
   Body,
@@ -40,7 +41,7 @@ type CheckInBody = {
   clientTime?: string;
   gpsLatitude?: number;
   gpsLongitude?: number;
-  awakeMonitoringEnabled?: boolean;
+  awakeMonitoringEnabled?: boolean; // backward compatible only; ignored by backend policy
 };
 
 type AwakeConfirmBody = {
@@ -278,7 +279,7 @@ export class MobileController {
       clientTime,
       gpsLatitude,
       gpsLongitude,
-      awakeMonitoringEnabled,
+      awakeMonitoringEnabledRequested: awakeMonitoringEnabled,
       gpsLatitudeType: typeof gpsLatitude,
       gpsLongitudeType: typeof gpsLongitude,
       awakeMonitoringEnabledType: typeof body?.awakeMonitoringEnabled,
