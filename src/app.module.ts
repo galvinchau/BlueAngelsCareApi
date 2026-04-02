@@ -1,6 +1,6 @@
-// src/app.module.ts
 import { Module } from '@nestjs/common';
 import { ServeStaticModule } from '@nestjs/serve-static';
+import { ScheduleModule } from '@nestjs/schedule';
 import { join } from 'path';
 
 import { AppController } from './app.controller';
@@ -29,8 +29,14 @@ import { VisitedMaintenanceModule } from './visited-maintenance/visited-maintena
 // ✅ SERVICE RATES
 import { ServiceRatesModule } from './service-rates/service-rates.module';
 
+// ✅ AWAKE CRON
+import { AwakeModule } from './awake/awake.module';
+
 @Module({
   imports: [
+    // ✅ Enable Nest cron / scheduler
+    ScheduleModule.forRoot(),
+
     // ✅ Serve /exports/* from local folder: uploads/exports
     ServeStaticModule.forRoot({
       rootPath: join(process.cwd(), 'uploads', 'exports'),
@@ -60,6 +66,9 @@ import { ServiceRatesModule } from './service-rates/service-rates.module';
 
     // ✅ SERVICE RATES
     ServiceRatesModule,
+
+    // ✅ Awake Monitoring cron
+    AwakeModule,
   ],
   controllers: [
     AppController,
