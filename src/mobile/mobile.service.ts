@@ -11,6 +11,7 @@ import { ScheduleStatus, VisitSource, type Individual } from '@prisma/client';
 import { DateTime } from 'luxon';
 import { PrismaService } from '../prisma/prisma.service';
 import { GoogleReportsService } from '../reports/google-reports.service';
+import { PushService } from '../push/push.service';
 
 export type ShiftStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED';
 
@@ -554,6 +555,7 @@ export class MobileService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly reportsService: GoogleReportsService,
+    private readonly pushService: PushService,
   ) {}
 
   private async resolveStaffIdentity(staffIdRaw: string): Promise<{
@@ -691,6 +693,144 @@ export class MobileService {
 
     const nextNumber = match ? Number(match[1]) + 1 : 1;
     return `HIR-${String(nextNumber).padStart(6, '0')}`;
+  }
+
+  async registerPushToken(input: {
+    staffId: string;
+    expoPushToken: string;
+    platform?: string;
+    deviceId?: string;
+    deviceName?: string;
+    appVersion?: string;
+  }) {
+    const identity = await this.resolveStaffIdentity(input.staffId);
+    if (!identity) {
+      throw new BadRequestException(`Employee not found: ${input.staffId}`);
+    }
+
+    const expoPushToken = String(input.expoPushToken || '').trim();
+
+    if (!this.pushService.isExpoPushToken(expoPushToken)) {
+      throw new BadRequestException('Invalid Expo push token.');
+    }
+
+    const saved = await this.prisma.mobilePushToken.upsert({
+      where: {
+        expoPushToken,
+      },
+      update: {
+        staffId: identity.techId,
+        platform: input.platform?.trim() || null,
+        deviceId: input.deviceId?.trim() || null,
+        deviceName: input.deviceName?.trim() || null,
+        appVersion: input.appVersion?.trim() || null,
+        isActive: true,
+        lastSeenAt: new Date(),
+        revokedAt: null,
+      },
+      create: {
+        staffId: identity.techId,
+        expoPushToken,
+        platform: input.platform?.trim() || null,
+        deviceId: input.deviceId?.trim() || null,
+        deviceName: input.deviceName?.trim() || null,
+        appVersion: input.appVersion?.trim() || null,
+        isActive: true,
+        lastSeenAt: new Date(),
+        revokedAt: null,
+      },
+    });
+
+    return {
+      status: 'OK',
+      id: saved.id,
+      expoPushToken: saved.expoPushToken,
+      isActive: saved.isActive,
+    };
+  }
+
+  async deactivatePushToken(input: {
+    staffId: string;
+    expoPushToken: string;
+  }) {
+    const identity = await this.resolveStaffIdentity(input.staffId);
+    if (!identity) {
+      throw new BadRequestException(`Employee not found: ${input.staffId}`);
+    }
+
+    const expoPushToken = String(input.expoPushToken || '').trim();
+
+    const result = await this.prisma.mobilePushToken.updateMany({
+      where: {
+        staffId: identity.techId,
+        expoPushToken,
+        isActive: true,
+      },
+      data: {
+        isActive: false,
+        revokedAt: new Date(),
+        lastSeenAt: new Date(),
+      },
+    });
+
+    return {
+      status: 'OK',
+      updated: result.count,
+    };
+  }
+
+  async sendTestPush(staffId: string) {
+    const identity = await this.resolveStaffIdentity(staffId);
+    if (!identity) {
+      throw new BadRequestException(`Employee not found: ${staffId}`);
+    }
+
+    return this.pushService.sendTestToStaff(identity.techId);
+  }
+
+  async sendShiftCancelledPush(input: {
+    staffId: string;
+    shiftId?: string;
+    individualName?: string | null;
+    serviceName?: string | null;
+    shiftDateLabel?: string | null;
+    shiftTimeLabel?: string | null;
+    note?: string | null;
+  }) {
+    const identity = await this.resolveStaffIdentity(input.staffId);
+    if (!identity) {
+      throw new BadRequestException(`Employee not found: ${input.staffId}`);
+    }
+
+    const title = 'Assigned Shift Cancelled';
+
+    const mainParts = [
+      input.individualName ? `Individual: ${input.individualName}` : null,
+      input.serviceName ? `Service: ${input.serviceName}` : null,
+      input.shiftDateLabel ? `Date: ${input.shiftDateLabel}` : null,
+      input.shiftTimeLabel ? `Time: ${input.shiftTimeLabel}` : null,
+    ].filter(Boolean);
+
+    const body =
+      mainParts.length > 0
+        ? `Your assigned shift has been cancelled.\n${mainParts.join('\n')}`
+        : 'Your assigned shift has been cancelled. Please check the app or contact the office.';
+
+    return this.pushService.sendToStaff(identity.techId, {
+      title,
+      body,
+      sound: 'default',
+      data: {
+        type: 'SHIFT_CANCELLED',
+        shiftId: input.shiftId ?? null,
+        individualName: input.individualName ?? null,
+        serviceName: input.serviceName ?? null,
+        shiftDateLabel: input.shiftDateLabel ?? null,
+        shiftTimeLabel: input.shiftTimeLabel ?? null,
+        note: input.note ?? null,
+        ts: new Date().toISOString(),
+      },
+    });
   }
 
   async startUnknownVisit(
@@ -1162,7 +1302,7 @@ export class MobileService {
 
     const overMinutes =
       plannedMins !== null && visitedMins !== null && visitedMins > plannedMins
-        ? visitedMins - visitedMins + (visitedMins - plannedMins)
+        ? visitedMins - plannedMins
         : 0;
 
     const underHours = lostMinutes > 0 ? minutesToHoursStr(lostMinutes) : '';

@@ -1,5 +1,3 @@
-// bac-hms/bac-api/src/mobile/mobile.controller.ts
-
 import {
   BadRequestException,
   Body,
@@ -46,6 +44,34 @@ type CheckInBody = {
 
 type AwakeConfirmBody = {
   staffId: string;
+};
+
+type RegisterPushTokenBody = {
+  staffId: string;
+  expoPushToken: string;
+  platform?: string;
+  deviceId?: string;
+  deviceName?: string;
+  appVersion?: string;
+};
+
+type DeactivatePushTokenBody = {
+  staffId: string;
+  expoPushToken: string;
+};
+
+type TestPushBody = {
+  staffId: string;
+};
+
+type ShiftCancelledPushBody = {
+  staffId: string;
+  shiftId?: string;
+  individualName?: string | null;
+  serviceName?: string | null;
+  shiftDateLabel?: string | null;
+  shiftTimeLabel?: string | null;
+  note?: string | null;
 };
 
 // ---------- helpers (no deps) ----------
@@ -242,13 +268,6 @@ export class MobileController {
   /**
    * ✅ NEW
    * POST /mobile/health-incident
-   *
-   * Normalize:
-   * - Require staffId
-   * - Ensure date (timestamp) exists (NOT NULL in DB)
-   * - If incidentDate + incidentTime present, use them to build date ISO
-   * - Ensure payload jsonb exists (NOT NULL in DB)
-   * - Only auto-set submittedAt when status != DRAFT
    */
   @Post('health-incident')
   submitHealthIncident(@Body() payload: MobileHealthIncidentPayload) {
@@ -346,5 +365,93 @@ export class MobileController {
     });
 
     return this.mobileService.confirmAwake(visitId, staffId);
+  }
+
+  /**
+   * ✅ NEW
+   * POST /mobile/push/register-token
+   */
+  @Post('push/register-token')
+  registerPushToken(@Body() body: RegisterPushTokenBody) {
+    const staffId = String(body?.staffId ?? '').trim();
+    const expoPushToken = String(body?.expoPushToken ?? '').trim();
+
+    if (!staffId) {
+      throw new BadRequestException('Missing staffId');
+    }
+
+    if (!expoPushToken) {
+      throw new BadRequestException('Missing expoPushToken');
+    }
+
+    return this.mobileService.registerPushToken({
+      staffId,
+      expoPushToken,
+      platform: body?.platform,
+      deviceId: body?.deviceId,
+      deviceName: body?.deviceName,
+      appVersion: body?.appVersion,
+    });
+  }
+
+  /**
+   * ✅ NEW
+   * POST /mobile/push/deactivate-token
+   */
+  @Post('push/deactivate-token')
+  deactivatePushToken(@Body() body: DeactivatePushTokenBody) {
+    const staffId = String(body?.staffId ?? '').trim();
+    const expoPushToken = String(body?.expoPushToken ?? '').trim();
+
+    if (!staffId) {
+      throw new BadRequestException('Missing staffId');
+    }
+
+    if (!expoPushToken) {
+      throw new BadRequestException('Missing expoPushToken');
+    }
+
+    return this.mobileService.deactivatePushToken({
+      staffId,
+      expoPushToken,
+    });
+  }
+
+  /**
+   * ✅ NEW
+   * POST /mobile/push/test
+   */
+  @Post('push/test')
+  sendTestPush(@Body() body: TestPushBody) {
+    const staffId = String(body?.staffId ?? '').trim();
+
+    if (!staffId) {
+      throw new BadRequestException('Missing staffId');
+    }
+
+    return this.mobileService.sendTestPush(staffId);
+  }
+
+  /**
+   * ✅ NEW
+   * POST /mobile/push/shift-cancelled
+   */
+  @Post('push/shift-cancelled')
+  sendShiftCancelledPush(@Body() body: ShiftCancelledPushBody) {
+    const staffId = String(body?.staffId ?? '').trim();
+
+    if (!staffId) {
+      throw new BadRequestException('Missing staffId');
+    }
+
+    return this.mobileService.sendShiftCancelledPush({
+      staffId,
+      shiftId: body?.shiftId,
+      individualName: body?.individualName ?? null,
+      serviceName: body?.serviceName ?? null,
+      shiftDateLabel: body?.shiftDateLabel ?? null,
+      shiftTimeLabel: body?.shiftTimeLabel ?? null,
+      note: body?.note ?? null,
+    });
   }
 }

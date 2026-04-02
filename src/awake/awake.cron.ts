@@ -6,16 +6,128 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ScheduleStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { PushService } from '../push/push.service';
 
 @Injectable()
 export class AwakeCronService {
   private readonly logger = new Logger(AwakeCronService.name);
   private isRunningOverdueJob = false;
+  private isRunningReminderJob = false;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly pushService: PushService,
+  ) {}
 
   /**
-   * Auto checkout all awake-monitoring visits that passed deadline
+   * 🔔 Send awake reminder push
+   * Runs every minute.
+   */
+  @Cron(CronExpression.EVERY_MINUTE, {
+    name: 'awake-reminder-push',
+  })
+  async handleAwakeReminderPush() {
+    if (this.isRunningReminderJob) {
+      this.logger.warn(
+        '[AwakeCron] Previous reminder job is still running. Skip this tick.',
+      );
+      return;
+    }
+
+    this.isRunningReminderJob = true;
+
+    try {
+      const now = new Date();
+
+      const dueVisits = await this.prisma.visit.findMany({
+        where: {
+          awakeMonitoringEnabled: true,
+          checkOutAt: null,
+          autoCheckedOutAt: null,
+          nextAwakeConfirmDueAt: {
+            lte: now,
+          },
+          awakeDeadlineAt: {
+            gt: now,
+          },
+          OR: [
+            { awakeStatus: 'ACTIVE' },
+            { awakeStatus: 'DUE' },
+            { awakeStatus: null },
+          ],
+        },
+        select: {
+          id: true,
+          dspId: true,
+          scheduleShiftId: true,
+          nextAwakeConfirmDueAt: true,
+          awakeDeadlineAt: true,
+          awakeStatus: true,
+        },
+        orderBy: {
+          nextAwakeConfirmDueAt: 'asc',
+        },
+        take: 200,
+      });
+
+      if (dueVisits.length === 0) {
+        return;
+      }
+
+      this.logger.log(
+        `[AwakeCron] Found ${dueVisits.length} due awake visit(s).`,
+      );
+
+      for (const visit of dueVisits) {
+        try {
+          // Tránh gửi lặp lại mỗi phút nếu đã đánh dấu DUE rồi
+          if (visit.awakeStatus === 'DUE') {
+            continue;
+          }
+
+          await this.prisma.visit.update({
+            where: { id: visit.id },
+            data: {
+              awakeStatus: 'DUE',
+            } as any,
+          });
+
+          await this.pushService.sendToStaff(visit.dspId, {
+            title: 'Awake Check Required',
+            body: 'Please confirm you are awake for your shift now.',
+            sound: 'default',
+            data: {
+              type: 'AWAKE_REMINDER',
+              visitId: visit.id,
+              shiftId: visit.scheduleShiftId ?? null,
+              nextDueAt: visit.nextAwakeConfirmDueAt?.toISOString() ?? null,
+              deadlineAt: visit.awakeDeadlineAt?.toISOString() ?? null,
+              ts: new Date().toISOString(),
+            },
+          });
+
+          this.logger.log(
+            `[AwakeCron] Reminder push sent → visit=${visit.id}, dsp=${visit.dspId}`,
+          );
+        } catch (error: any) {
+          this.logger.error(
+            `[AwakeCron] Failed reminder push for visit ${visit.id}: ${error?.message ?? error}`,
+            error?.stack,
+          );
+        }
+      }
+    } catch (error: any) {
+      this.logger.error(
+        `[AwakeCron] Reminder job failed: ${error?.message ?? error}`,
+        error?.stack,
+      );
+    } finally {
+      this.isRunningReminderJob = false;
+    }
+  }
+
+  /**
+   * ❌ Auto checkout all awake-monitoring visits that passed deadline
    * Runs every minute.
    */
   @Cron(CronExpression.EVERY_MINUTE, {
@@ -87,6 +199,9 @@ export class AwakeCronService {
 
   private async autoCheckoutSingleVisit(visitId: string): Promise<void> {
     const processedAt = new Date();
+
+    let pushTargetStaffId: string | null = null;
+    let pushShiftId: string | null = null;
 
     await this.prisma.$transaction(async (tx) => {
       const visit = await tx.visit.findUnique({
@@ -182,16 +297,39 @@ export class AwakeCronService {
         }
       }
 
+      pushTargetStaffId = visit.dspId;
+      pushShiftId = visit.scheduleShiftId ?? null;
+
       this.logger.warn(
         `[AwakeCron] AUTO CHECKOUT completed for visit=${visit.id}, shift=${visit.scheduleShiftId ?? 'N/A'}, dsp=${visit.dspId}, deadline=${effectiveCheckoutAt.toISOString()}, reason=FAIL_CONFIRM_AWAKE`,
       );
-
-      /**
-       * NEXT PHASE HOOKS:
-       * 1) Send push to DSP: "Shift auto checked out because awake confirmation was missed"
-       * 2) Send notification/email/in-app alert to Office
-       * 3) Optionally create audit record / notification row
-       */
     });
+
+    // Send push OUTSIDE transaction
+    if (pushTargetStaffId) {
+      try {
+        await this.pushService.sendToStaff(pushTargetStaffId, {
+          title: 'Shift Auto Checked Out',
+          body: 'You missed Awake confirmation. Your shift has been automatically ended.',
+          sound: 'default',
+          data: {
+            type: 'AWAKE_AUTO_CHECKOUT',
+            visitId,
+            shiftId: pushShiftId,
+            reason: 'FAIL_CONFIRM_AWAKE',
+            ts: new Date().toISOString(),
+          },
+        });
+
+        this.logger.log(
+          `[AwakeCron] Auto-checkout push sent → visit=${visitId}, dsp=${pushTargetStaffId}`,
+        );
+      } catch (error: any) {
+        this.logger.error(
+          `[AwakeCron] Failed auto-checkout push for visit ${visitId}: ${error?.message ?? error}`,
+          error?.stack,
+        );
+      }
+    }
   }
 }

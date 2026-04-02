@@ -1,4 +1,3 @@
-// src/mobile/mobile.module.ts
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 
@@ -14,17 +13,20 @@ import { MobileMedicationsService } from './mobile.medications.service';
 import { MobilePocController } from './mobile.poc.controller';
 import { MobilePocService } from './mobile.poc.service';
 
+// ✅ Push module
+import { PushModule } from '../push/push.module';
+
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, PushModule],
   controllers: [
     MobileController,
     MobileMedicationsController,
-    MobilePocController, // ✅ ADD
+    MobilePocController,
   ],
   providers: [
     MobileService,
     MobileMedicationsService,
-    MobilePocService, // ✅ ADD
+    MobilePocService,
     GoogleReportsService,
   ],
 })

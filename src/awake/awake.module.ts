@@ -3,11 +3,13 @@
 // ======================================================
 
 import { Module } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaModule } from '../prisma/prisma.module';
+import { PushModule } from '../push/push.module';
 import { AwakeCronService } from './awake.cron';
 
 @Module({
-  providers: [PrismaService, AwakeCronService],
+  imports: [PrismaModule, PushModule],
+  providers: [AwakeCronService],
   exports: [AwakeCronService],
 })
 export class AwakeModule {}
