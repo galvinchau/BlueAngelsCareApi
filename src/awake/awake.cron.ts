@@ -19,6 +19,39 @@ export class AwakeCronService {
     private readonly pushService: PushService,
   ) {}
 
+  private async logAwakeEvent(args: {
+    visitId: string;
+    scheduleShiftId?: string | null;
+    individualId: string;
+    dspId: string;
+    serviceId?: string | null;
+    eventType: 'REMINDER_SENT' | 'AUTO_CHECKOUT_FAIL_CONFIRM';
+    eventTime?: Date;
+    note?: string | null;
+    meta?: Record<string, any> | null;
+  }) {
+    try {
+      await (this.prisma as any).awakeEventLog.create({
+        data: {
+          visitId: args.visitId,
+          scheduleShiftId: args.scheduleShiftId ?? null,
+          individualId: args.individualId,
+          dspId: args.dspId,
+          serviceId: args.serviceId ?? null,
+          eventType: args.eventType,
+          eventTime: args.eventTime ?? new Date(),
+          note: args.note ?? null,
+          meta: args.meta ?? null,
+        },
+      });
+    } catch (e: any) {
+      this.logger.error(
+        `[AwakeCron][AwakeEventLog] failed for visit ${args.visitId}: ${e?.message ?? e}`,
+        e?.stack,
+      );
+    }
+  }
+
   /**
    * 🔔 Send awake reminder push
    * Runs every minute.
@@ -59,6 +92,8 @@ export class AwakeCronService {
         select: {
           id: true,
           dspId: true,
+          individualId: true,
+          serviceId: true,
           scheduleShiftId: true,
           nextAwakeConfirmDueAt: true,
           awakeDeadlineAt: true,
@@ -103,6 +138,22 @@ export class AwakeCronService {
               nextDueAt: visit.nextAwakeConfirmDueAt?.toISOString() ?? null,
               deadlineAt: visit.awakeDeadlineAt?.toISOString() ?? null,
               ts: new Date().toISOString(),
+            },
+          });
+
+          await this.logAwakeEvent({
+            visitId: visit.id,
+            scheduleShiftId: visit.scheduleShiftId ?? null,
+            individualId: visit.individualId,
+            dspId: visit.dspId,
+            serviceId: visit.serviceId ?? null,
+            eventType: 'REMINDER_SENT',
+            eventTime: now,
+            note: 'Awake reminder push sent.',
+            meta: {
+              source: 'AWAKE_CRON_REMINDER',
+              nextDueAt: visit.nextAwakeConfirmDueAt?.toISOString() ?? null,
+              deadlineAt: visit.awakeDeadlineAt?.toISOString() ?? null,
             },
           });
 
@@ -158,6 +209,8 @@ export class AwakeCronService {
         select: {
           id: true,
           scheduleShiftId: true,
+          individualId: true,
+          serviceId: true,
           dspId: true,
           checkInAt: true,
           awakeDeadlineAt: true,
@@ -209,6 +262,8 @@ export class AwakeCronService {
         select: {
           id: true,
           dspId: true,
+          individualId: true,
+          serviceId: true,
           scheduleShiftId: true,
           checkInAt: true,
           checkOutAt: true,
@@ -264,6 +319,25 @@ export class AwakeCronService {
         );
         return;
       }
+
+      await (tx as any).awakeEventLog.create({
+        data: {
+          visitId: visit.id,
+          scheduleShiftId: visit.scheduleShiftId ?? null,
+          individualId: visit.individualId,
+          dspId: visit.dspId,
+          serviceId: visit.serviceId ?? null,
+          eventType: 'AUTO_CHECKOUT_FAIL_CONFIRM',
+          eventTime: processedAt,
+          note: 'Visit auto checked out due to missed awake confirmation.',
+          meta: {
+            source: 'AWAKE_CRON_AUTO_CHECKOUT',
+            effectiveCheckoutAt: effectiveCheckoutAt.toISOString(),
+            awakeDeadlineAt: visit.awakeDeadlineAt?.toISOString() ?? null,
+            reason: 'FAIL_CONFIRM_AWAKE',
+          },
+        },
+      });
 
       if (visit.scheduleShiftId) {
         const existingShift = await tx.scheduleShift.findUnique({

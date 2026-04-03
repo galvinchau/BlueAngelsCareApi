@@ -23,6 +23,7 @@ import type {
   DailyNotesFilter,
   HealthIncidentFilter,
   HealthIncidentAttachmentInput,
+  AwakeReportFilter,
 } from './reports.service';
 import { FileReportsService } from './file-reports.service';
 
@@ -231,6 +232,51 @@ export class ReportsController {
   }
 
   // =========================
+  // AWAKE REPORT
+  // =========================
+
+  @Get('awake')
+  async getAwakeReports(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('staffId') staffId?: string,
+    @Query('individualId') individualId?: string,
+    @Query('status') status?: string,
+  ) {
+    const filter: AwakeReportFilter = {
+      from,
+      to,
+      staffId,
+      individualId,
+      status,
+    };
+    const items = await this.reportsService.getAwakeReports(filter);
+    return { items };
+  }
+
+  @Get('awake/:id')
+  async getAwakeReportDetail(@Param('id') id: string) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    const rpt = await this.reportsService.getAwakeReportDetail(id);
+    if (!rpt) throw new NotFoundException('Awake report not found');
+    return rpt;
+  }
+
+  @Get('awake/:id/timeline')
+  async getAwakeTimeline(@Param('id') id: string) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
+
+    const items = await this.reportsService.getAwakeTimeline(id);
+    if (!items) throw new NotFoundException('Awake report not found');
+    return { items };
+  }
+
+  // =========================
   // HEALTH & INCIDENT
   // =========================
 
@@ -291,7 +337,7 @@ export class ReportsController {
     return { items };
   }
 
-    @Get('health-incident/:id/attachments/:attachmentId/download')
+  @Get('health-incident/:id/attachments/:attachmentId/download')
   async downloadHealthIncidentAttachment(
     @Param('id') id: string,
     @Param('attachmentId') attachmentId: string,

@@ -233,7 +233,7 @@ model Employee {
 
   // ✅ NEW: refresh tokens for mobile "remember device"
   mobileRefreshTokens MobileRefreshToken[]
-  mobilePushTokens MobilePushToken[]
+  mobilePushTokens    MobilePushToken[]
 }
 
 /**
@@ -465,6 +465,15 @@ enum CancelledBy {
   OFFICE
 }
 
+enum AwakeEventType {
+  CHECK_IN_AWAKE_STARTED
+  REMINDER_SENT
+  CONFIRMED_AWAKE
+  AUTO_CHECKOUT_FAIL_CONFIRM
+  MANUAL_CHECKOUT
+  SHIFT_COMPLETED
+}
+
 // =====================================================
 //  MASTER SCHEDULE TEMPLATE (lịch cứng – Master Week)
 // =====================================================
@@ -611,7 +620,7 @@ model Visit {
 
   reviewedAt DateTime?
 
-    // =====================================================
+  // =====================================================
   //  AWAKE MONITORING (Phase 1)
   // =====================================================
 
@@ -622,23 +631,23 @@ model Visit {
 
   awakeStatus String?
 
-  lastAwakeConfirmedAt DateTime?
+  lastAwakeConfirmedAt  DateTime?
   nextAwakeConfirmDueAt DateTime?
   awakeDeadlineAt       DateTime?
 
-  autoCheckedOutAt  DateTime?
+  autoCheckedOutAt   DateTime?
   autoCheckoutReason String?
 
   // ✅ ADD: lock after claim creation
   isClaimLocked Boolean  @default(false)
   claimedAt     DateTime?
 
-  scheduleShift ScheduleShift? @relation(fields: [scheduleShiftId], references: [id])
-  individual    Individual     @relation(fields: [individualId], references: [id], onDelete: Cascade)
-  dsp           Employee       @relation("VisitDSP", fields: [dspId], references: [id])
-  service       Service?       @relation(fields: [serviceId], references: [id])
-
-  claimItem ClaimItem?
+  scheduleShift   ScheduleShift?   @relation(fields: [scheduleShiftId], references: [id])
+  individual      Individual       @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  dsp             Employee         @relation("VisitDSP", fields: [dspId], references: [id])
+  service         Service?         @relation(fields: [serviceId], references: [id])
+  claimItem       ClaimItem?
+  awakeEventLogs  AwakeEventLog[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -647,6 +656,32 @@ model Visit {
   @@index([dspId, checkInAt])
   @@index([individualId, checkInAt])
   @@index([isClaimLocked])
+}
+
+model AwakeEventLog {
+  id String @id @default(cuid())
+
+  visitId String
+  visit   Visit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+
+  scheduleShiftId String?
+  individualId    String
+  dspId           String
+  serviceId       String?
+
+  eventType AwakeEventType
+  eventTime DateTime @default(now())
+
+  note String?
+  meta Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([visitId, eventTime])
+  @@index([scheduleShiftId, eventTime])
+  @@index([individualId, eventTime])
+  @@index([dspId, eventTime])
+  @@index([eventType, eventTime])
 }
 
 // =====================================================

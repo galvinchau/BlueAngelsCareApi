@@ -558,6 +558,43 @@ export class MobileService {
     private readonly pushService: PushService,
   ) {}
 
+  private async logAwakeEvent(args: {
+    visitId: string;
+    scheduleShiftId?: string | null;
+    individualId: string;
+    dspId: string;
+    serviceId?: string | null;
+    eventType:
+      | 'CHECK_IN_AWAKE_STARTED'
+      | 'CONFIRMED_AWAKE'
+      | 'MANUAL_CHECKOUT';
+    eventTime?: Date;
+    note?: string | null;
+    meta?: Record<string, any> | null;
+  }) {
+    try {
+      await (this.prisma as any).awakeEventLog.create({
+        data: {
+          visitId: args.visitId,
+          scheduleShiftId: args.scheduleShiftId ?? null,
+          individualId: args.individualId,
+          dspId: args.dspId,
+          serviceId: args.serviceId ?? null,
+          eventType: args.eventType,
+          eventTime: args.eventTime ?? new Date(),
+          note: args.note ?? null,
+          meta: args.meta ?? null,
+        },
+      });
+    } catch (e: any) {
+      console.error('[MobileService][AwakeEventLog] failed', {
+        eventType: args.eventType,
+        visitId: args.visitId,
+        message: e?.message ?? e,
+      });
+    }
+  }
+
   private async resolveStaffIdentity(staffIdRaw: string): Promise<{
     techId: string;
     employeeId: string | null;
@@ -1546,6 +1583,23 @@ export class MobileService {
           },
         });
 
+        if (shouldEnableAwakeNow) {
+          await this.logAwakeEvent({
+            visitId: updatedExisting.id,
+            scheduleShiftId: updatedExisting.scheduleShiftId ?? null,
+            individualId: updatedExisting.individualId,
+            dspId: updatedExisting.dspId,
+            serviceId: updatedExisting.serviceId ?? null,
+            eventType: 'CHECK_IN_AWAKE_STARTED',
+            eventTime: updatedExisting.checkInAt ?? checkInAt,
+            note: 'Awake monitoring started on existing open visit.',
+            meta: {
+              source: 'MOBILE_CHECK_IN_EXISTING_OPEN_VISIT',
+              awakeRequiredByOffice,
+            },
+          });
+        }
+
         console.log('[MobileService][check-in] updated existing open visit =', {
           id: updatedExisting.id,
           gpsLatitude: updatedExisting.gpsLatitude,
@@ -1632,6 +1686,23 @@ export class MobileService {
       },
     });
 
+    if (awakeRequiredByOffice === true) {
+      await this.logAwakeEvent({
+        visitId: visit.id,
+        scheduleShiftId: visit.scheduleShiftId ?? null,
+        individualId: visit.individualId,
+        dspId: visit.dspId,
+        serviceId: visit.serviceId ?? null,
+        eventType: 'CHECK_IN_AWAKE_STARTED',
+        eventTime: visit.checkInAt ?? checkInAt,
+        note: 'Awake monitoring started on new visit check-in.',
+        meta: {
+          source: 'MOBILE_CHECK_IN_NEW_VISIT',
+          awakeRequiredByOffice,
+        },
+      });
+    }
+
     console.log('[MobileService][check-in] created visit =', {
       id: visit.id,
       gpsLatitude: visit.gpsLatitude,
@@ -1713,6 +1784,23 @@ export class MobileService {
       where: { id: visit.id },
       data: {
         ...confirmData,
+      },
+    });
+
+    await this.logAwakeEvent({
+      visitId: updatedVisit.id,
+      scheduleShiftId: updatedVisit.scheduleShiftId ?? null,
+      individualId: updatedVisit.individualId,
+      dspId: updatedVisit.dspId,
+      serviceId: updatedVisit.serviceId ?? null,
+      eventType: 'CONFIRMED_AWAKE',
+      eventTime: confirmedAt,
+      note: 'DSP confirmed awake.',
+      meta: {
+        source: 'MOBILE_AWAKE_CONFIRM',
+        awakeStatus: updatedVisit.awakeStatus ?? null,
+        nextAwakeConfirmDueAt: updatedVisit.nextAwakeConfirmDueAt ?? null,
+        awakeDeadlineAt: updatedVisit.awakeDeadlineAt ?? null,
       },
     });
 
@@ -1829,6 +1917,24 @@ export class MobileService {
             openVisit.gpsLongitude == null ? lng : openVisit.gpsLongitude,
         },
       });
+
+      if (updatedVisit.awakeMonitoringEnabled === true) {
+        await this.logAwakeEvent({
+          visitId: updatedVisit.id,
+          scheduleShiftId: updatedVisit.scheduleShiftId ?? null,
+          individualId: updatedVisit.individualId,
+          dspId: updatedVisit.dspId,
+          serviceId: updatedVisit.serviceId ?? null,
+          eventType: 'MANUAL_CHECKOUT',
+          eventTime: checkOutAt,
+          note: 'DSP manually checked out awake visit.',
+          meta: {
+            source: 'MOBILE_CHECK_OUT_OPEN_VISIT',
+            autoCheckedOutAt: updatedVisit.autoCheckedOutAt ?? null,
+            autoCheckoutReason: updatedVisit.autoCheckoutReason ?? null,
+          },
+        });
+      }
 
       console.log('[MobileService][check-out] updated open visit =', {
         id: updatedVisit.id,

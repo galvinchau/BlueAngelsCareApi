@@ -63,6 +63,14 @@ export type HealthIncidentFilter = {
   status?: string;
 };
 
+export type AwakeReportFilter = {
+  from?: string;
+  to?: string;
+  staffId?: string;
+  individualId?: string;
+  status?: string;
+};
+
 export type HealthIncidentAttachmentInput = {
   category?: string;
   fileName?: string;
@@ -81,15 +89,20 @@ export class ReportsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly mailService: MailService,
-  ) {}
+  ) { }
 
   private toLocalISODate(d: Date): string {
-    return DateTime.fromJSDate(d, { zone: 'utc' }).setZone(TZ).toISODate() ?? '';
+    return (
+      DateTime.fromJSDate(d, { zone: 'utc' }).setZone(TZ).toISODate() ?? ''
+    );
   }
 
   private toLocalTimeHHmm(d?: Date | null): string {
     if (!d) return '';
-    return DateTime.fromJSDate(d, { zone: 'utc' }).setZone(TZ).toFormat('HH:mm') ?? '';
+    return (
+      DateTime.fromJSDate(d, { zone: 'utc' }).setZone(TZ).toFormat('HH:mm') ??
+      ''
+    );
   }
 
   private toLocalDateTime(d?: Date | null): string {
@@ -175,13 +188,21 @@ export class ReportsService {
     const w1n = this.asText(p.witness1Name);
     const w1c = this.asText(p.witness1Contact);
     if (w1n || w1c) {
-      rows.push([w1n || 'Witness 1', w1c ? `(${w1c})` : ''].filter(Boolean).join(' '));
+      rows.push(
+        [w1n || 'Witness 1', w1c ? `(${w1c})` : '']
+          .filter(Boolean)
+          .join(' '),
+      );
     }
 
     const w2n = this.asText(p.witness2Name);
     const w2c = this.asText(p.witness2Contact);
     if (w2n || w2c) {
-      rows.push([w2n || 'Witness 2', w2c ? `(${w2c})` : ''].filter(Boolean).join(' '));
+      rows.push(
+        [w2n || 'Witness 2', w2c ? `(${w2c})` : '']
+          .filter(Boolean)
+          .join(' '),
+      );
     }
 
     return rows.join('\n');
@@ -236,7 +257,10 @@ export class ReportsService {
     return null;
   }
 
-  private extractIncidentTypeList(detailIncidentType: any, payload: any): string[] {
+  private extractIncidentTypeList(
+    detailIncidentType: any,
+    payload: any,
+  ): string[] {
     const p = this.parsePayloadObject(payload);
 
     if (Array.isArray(p.incidentTypes)) {
@@ -262,7 +286,9 @@ export class ReportsService {
   }
 
   private isIncidentTypeChecked(selected: string[], item: string) {
-    return selected.some((x) => x.trim().toLowerCase() === item.trim().toLowerCase());
+    return selected.some(
+      (x) => x.trim().toLowerCase() === item.trim().toLowerCase(),
+    );
   }
 
   private buildHealthIncidentWebUrl(reportId: string): string | null {
@@ -328,6 +354,31 @@ export class ReportsService {
     }
 
     return maxLines ? out.slice(0, maxLines) : out;
+  }
+
+  private computeAwakeFinalStatus(args: {
+    reminderCount: number;
+    confirmCount: number;
+    hasAutoCheckoutFail: boolean;
+    hasManualCheckout: boolean;
+    autoCheckoutReason?: string | null;
+    autoCheckedOutAt?: Date | null;
+  }): 'PASSED' | 'FAILED' {
+    if (args.hasAutoCheckoutFail) return 'FAILED';
+
+    if (args.autoCheckedOutAt) return 'FAILED';
+
+    if (String(args.autoCheckoutReason || '').trim() !== '') return 'FAILED';
+
+    if (args.reminderCount > 0) {
+      return args.confirmCount >= args.reminderCount ? 'PASSED' : 'FAILED';
+    }
+
+    if (args.hasManualCheckout) {
+      return 'PASSED';
+    }
+
+    return 'FAILED';
   }
 
   private healthIncidentSelect() {
@@ -445,7 +496,8 @@ export class ReportsService {
 
       await sendFn.call(this.mailService, {
         to,
-        supervisorName: updated?.supervisorName || updated?.ciAssignedByName || null,
+        supervisorName:
+          updated?.supervisorName || updated?.ciAssignedByName || null,
         ciName: updated?.investigatedByName || updated?.ciName || null,
         individualName: updated?.individualName || null,
         incidentType: mapped?.incidentType || null,
@@ -472,10 +524,13 @@ export class ReportsService {
         ciName: updated?.ciName || updated?.investigatedByName || null,
         incidentType: mapped?.incidentType || null,
         reportDateLocal: updated?.date ? this.toLocalISODate(updated.date) : null,
-        finalDecision: updated?.finalDecision || updated?.supervisorDecision || null,
+        finalDecision:
+          updated?.finalDecision || updated?.supervisorDecision || null,
         finalSummary: updated?.finalSummary || null,
         closedByName: updated?.closedByName || updated?.supervisorName || null,
-        closedDateLocal: updated?.closedAt ? this.toLocalDateTime(updated.closedAt) : null,
+        closedDateLocal: updated?.closedAt
+          ? this.toLocalDateTime(updated.closedAt)
+          : null,
         link: this.buildHealthIncidentWebUrl(updated?.id),
       });
     } catch (e: any) {
@@ -720,13 +775,23 @@ export class ReportsService {
       this.asText(args.dateLocal) ||
       this.parseAnyDateToYYYYMMDD(new Date().toISOString());
 
-    const shiftText = args.shiftStart && args.shiftEnd ? `${args.shiftStart} - ${args.shiftEnd}` : '-';
+    const shiftText =
+      args.shiftStart && args.shiftEnd
+        ? `${args.shiftStart} - ${args.shiftEnd}`
+        : '-';
 
-    const incidentTypeList = this.extractIncidentTypeList(args.incidentType, payload);
+    const incidentTypeList = this.extractIncidentTypeList(
+      args.incidentType,
+      payload,
+    );
 
-    const incidentDate = this.asText(payload.incidentDate) || this.asText(args.dateLocal) || reportDate;
+    const incidentDate =
+      this.asText(payload.incidentDate) ||
+      this.asText(args.dateLocal) ||
+      reportDate;
     const incidentTime = this.asText(payload.incidentTime);
-    const location = this.asText(payload.location) || this.asText(payload.incidentLocation);
+    const location =
+      this.asText(payload.location) || this.asText(payload.incidentLocation);
 
     const description =
       this.asText(payload.description) ||
@@ -736,17 +801,22 @@ export class ReportsService {
     const reporterSignatureName =
       this.asText(payload.reportedByName) || this.asText(args.staffName) || '-';
 
-    const reporterSignatureDate = this.asText(payload.reportDate) || reportDate || '-';
+    const reporterSignatureDate =
+      this.asText(payload.reportDate) || reportDate || '-';
 
     const witnesses = this.joinWitnessesFromPayload(payload);
-    const additionalNotes = this.asText(payload.additionalNotes) || this.asText(payload.attachments);
+    const additionalNotes =
+      this.asText(payload.additionalNotes) || this.asText(payload.attachments);
 
     const supervisorSignatureName =
-      this.asText(args.ciAssignedByName) || this.asText(args.supervisorName) || '-';
+      this.asText(args.ciAssignedByName) ||
+      this.asText(args.supervisorName) ||
+      '-';
 
     const supervisorSignatureDate =
-      this.parseAnyDateToYYYYMMDD(this.safeStr(args.ciAssignedAt) || this.safeStr(args.reviewedAt)) ||
-      '_____________';
+      this.parseAnyDateToYYYYMMDD(
+        this.safeStr(args.ciAssignedAt) || this.safeStr(args.reviewedAt),
+      ) || '_____________';
 
     drawHeader(page1, `Status: ${this.safeStr(args.status || '-')}`);
 
@@ -776,23 +846,52 @@ export class ReportsService {
 
     y -= 42;
 
-    drawFieldBox(page1, 'Report Date', this.asPdfText(reportDate) || '-', margin, y, contentWidth / 2, 42, {
-      valueSize: 11,
-      boldValue: true,
-    });
+    drawFieldBox(
+      page1,
+      'Report Date',
+      this.asPdfText(reportDate) || '-',
+      margin,
+      y,
+      contentWidth / 2,
+      42,
+      {
+        valueSize: 11,
+        boldValue: true,
+      },
+    );
 
-    drawFieldBox(page1, 'Shift', this.asPdfText(shiftText) || '-', margin + contentWidth / 2, y, contentWidth / 2, 42, {
-      valueSize: 11,
-      boldValue: true,
-    });
+    drawFieldBox(
+      page1,
+      'Shift',
+      this.asPdfText(shiftText) || '-',
+      margin + contentWidth / 2,
+      y,
+      contentWidth / 2,
+      42,
+      {
+        valueSize: 11,
+        boldValue: true,
+      },
+    );
 
     y -= 42;
 
     const incidentBlockHeight = 182;
-    drawFieldBox(page1, 'Type of Incident', '', margin, y, contentWidth, incidentBlockHeight);
+    drawFieldBox(
+      page1,
+      'Type of Incident',
+      '',
+      margin,
+      y,
+      contentWidth,
+      incidentBlockHeight,
+    );
 
     const cellTop = y - 22;
-    const rows = Math.max(INCIDENT_TYPES_LEFT.length, INCIDENT_TYPES_RIGHT.length);
+    const rows = Math.max(
+      INCIDENT_TYPES_LEFT.length,
+      INCIDENT_TYPES_RIGHT.length,
+    );
     const cellHeight = 20;
     const leftX = margin + 1;
     const colWidth = contentWidth / 2 - 1;
@@ -829,52 +928,124 @@ export class ReportsService {
 
     y -= incidentBlockHeight;
 
-    drawFieldBox(page1, 'Incident Date', this.asPdfText(incidentDate) || '-', margin, y, contentWidth / 2, 42, {
-      valueSize: 11,
-      boldValue: true,
-    });
+    drawFieldBox(
+      page1,
+      'Incident Date',
+      this.asPdfText(incidentDate) || '-',
+      margin,
+      y,
+      contentWidth / 2,
+      42,
+      {
+        valueSize: 11,
+        boldValue: true,
+      },
+    );
 
-    drawFieldBox(page1, 'Incident Time', this.asPdfText(incidentTime) || '-', margin + contentWidth / 2, y, contentWidth / 2, 42, {
-      valueSize: 11,
-      boldValue: true,
-    });
+    drawFieldBox(
+      page1,
+      'Incident Time',
+      this.asPdfText(incidentTime) || '-',
+      margin + contentWidth / 2,
+      y,
+      contentWidth / 2,
+      42,
+      {
+        valueSize: 11,
+        boldValue: true,
+      },
+    );
 
     y -= 42;
 
-    drawFieldBox(page1, 'Location', this.asPdfText(location) || '-', margin, y, contentWidth, 50, {
-      valueSize: 10,
-      boldValue: true,
-    });
+    drawFieldBox(
+      page1,
+      'Location',
+      this.asPdfText(location) || '-',
+      margin,
+      y,
+      contentWidth,
+      50,
+      {
+        valueSize: 10,
+        boldValue: true,
+      },
+    );
 
     y -= 50;
 
-    drawFieldBox(page1, 'Description of Incident', this.toPdfSafeText(description || ''), margin, y, contentWidth, 120, {
-      valueSize: 10,
-    });
+    drawFieldBox(
+      page1,
+      'Description of Incident',
+      this.toPdfSafeText(description || ''),
+      margin,
+      y,
+      contentWidth,
+      120,
+      {
+        valueSize: 10,
+      },
+    );
 
     y -= 120;
 
-    drawFieldBox(page1, 'Signature of Reporter', this.asPdfText(reporterSignatureName) || '-', margin, y, contentWidth / 2, 62, {
-      valueSize: 10,
-      boldValue: true,
-    });
+    drawFieldBox(
+      page1,
+      'Signature of Reporter',
+      this.asPdfText(reporterSignatureName) || '-',
+      margin,
+      y,
+      contentWidth / 2,
+      62,
+      {
+        valueSize: 10,
+        boldValue: true,
+      },
+    );
 
-    drawFieldBox(page1, 'Date', this.asPdfText(reporterSignatureDate) || '-', margin + contentWidth / 2, y, contentWidth / 2, 62, {
-      valueSize: 10,
-      boldValue: true,
-    });
+    drawFieldBox(
+      page1,
+      'Date',
+      this.asPdfText(reporterSignatureDate) || '-',
+      margin + contentWidth / 2,
+      y,
+      contentWidth / 2,
+      62,
+      {
+        valueSize: 10,
+        boldValue: true,
+      },
+    );
 
     y -= 62;
 
-    drawFieldBox(page1, 'Witnesses', this.toPdfSafeText(witnesses || ''), margin, y, contentWidth, 70, {
-      valueSize: 10,
-    });
+    drawFieldBox(
+      page1,
+      'Witnesses',
+      this.toPdfSafeText(witnesses || ''),
+      margin,
+      y,
+      contentWidth,
+      70,
+      {
+        valueSize: 10,
+      },
+    );
 
     y -= 70;
 
-    drawFieldBox(page1, 'Additional Notes', this.toPdfSafeText(additionalNotes || ''), margin, y, contentWidth, 72, {
-      valueSize: 10,
-    });
+    drawFieldBox(
+      page1,
+      'Additional Notes',
+      this.toPdfSafeText(additionalNotes || ''),
+      margin,
+      y,
+      contentWidth,
+      72,
+      {
+        valueSize: 10,
+      },
+    );
 
     drawHeader(page2);
 
@@ -888,10 +1059,19 @@ export class ReportsService {
 
     let y2 = 656;
 
-    drawFieldBox(page2, 'Status', this.asPdfText(args.status) || '-', margin, y2, contentWidth / 3, 42, {
-      valueSize: 11,
-      boldValue: true,
-    });
+    drawFieldBox(
+      page2,
+      'Status',
+      this.asPdfText(args.status) || '-',
+      margin,
+      y2,
+      contentWidth / 3,
+      42,
+      {
+        valueSize: 11,
+        boldValue: true,
+      },
+    );
 
     drawFieldBox(
       page2,
@@ -913,8 +1093,9 @@ export class ReportsService {
       `CI Name: ${this.asPdfText(args.ciName) || '-'}`,
       `CI Email: ${this.asPdfText(args.ciEmail) || '-'}`,
       `CI Phone: ${this.asPdfText(args.ciPhone) || '-'}`,
-      `Assigned At: ${this.asPdfText(this.safeStr(args.ciAssignedAt) || '-')}${
-        this.asPdfText(args.ciAssignedByName) ? `  By: ${this.asPdfText(args.ciAssignedByName)}` : ''
+      `Assigned At: ${this.asPdfText(this.safeStr(args.ciAssignedAt) || '-')}${this.asPdfText(args.ciAssignedByName)
+        ? `  By: ${this.asPdfText(args.ciAssignedByName)}`
+        : ''
       }`,
     ].join('\n');
 
@@ -924,15 +1105,33 @@ export class ReportsService {
 
     y2 -= 90;
 
-    drawFieldBox(page2, 'Supervisor Decision', this.toPdfSafeText(this.asText(args.supervisorDecision) || ''), margin, y2, contentWidth, 140, {
-      valueSize: 10,
-    });
+    drawFieldBox(
+      page2,
+      'Supervisor Decision',
+      this.toPdfSafeText(this.asText(args.supervisorDecision) || ''),
+      margin,
+      y2,
+      contentWidth,
+      140,
+      {
+        valueSize: 10,
+      },
+    );
 
     y2 -= 140;
 
-    drawFieldBox(page2, 'Actions Taken', this.toPdfSafeText(this.asText(args.supervisorActionsTaken) || ''), margin, y2, contentWidth, 140, {
-      valueSize: 10,
-    });
+    drawFieldBox(
+      page2,
+      'Actions Taken',
+      this.toPdfSafeText(this.asText(args.supervisorActionsTaken) || ''),
+      margin,
+      y2,
+      contentWidth,
+      140,
+      {
+        valueSize: 10,
+      },
+    );
 
     page2.drawText('Supervisor Signature', {
       x: 236,
@@ -1011,7 +1210,9 @@ export class ReportsService {
     }
 
     const where: any = {};
-    if (gte || lt) where.date = { ...(gte ? { gte } : {}), ...(lt ? { lt } : {}) };
+    if (gte || lt) {
+      where.date = { ...(gte ? { gte } : {}), ...(lt ? { lt } : {}) };
+    }
     if (filter.staffId) where.staffId = filter.staffId;
     if (filter.individualId) where.individualId = filter.individualId;
 
@@ -1113,6 +1314,325 @@ export class ReportsService {
     return dn;
   }
 
+  async getAwakeReports(filter: AwakeReportFilter) {
+    const from = this.normalizeDateInput(filter.from);
+    const to = this.normalizeDateInput(filter.to);
+
+    let gte: Date | undefined;
+    let lt: Date | undefined;
+
+    if (from) {
+      const startLocal = DateTime.fromISO(from, { zone: TZ }).startOf('day');
+      gte = startLocal.toUTC().toJSDate();
+    }
+
+    if (to) {
+      const endLocalExclusive = DateTime.fromISO(to, { zone: TZ })
+        .plus({ days: 1 })
+        .startOf('day');
+      lt = endLocalExclusive.toUTC().toJSDate();
+    }
+
+    const where: any = {
+      awakeMonitoringEnabled: true,
+    };
+
+    if (gte || lt) {
+      where.checkInAt = {
+        ...(gte ? { gte } : {}),
+        ...(lt ? { lt } : {}),
+      };
+    }
+
+    if (filter.staffId) where.dspId = filter.staffId;
+    if (filter.individualId) where.individualId = filter.individualId;
+
+    const visits = await this.prisma.visit.findMany({
+      where,
+      orderBy: { checkInAt: 'desc' },
+      select: {
+        id: true,
+        scheduleShiftId: true,
+        individualId: true,
+        dspId: true,
+        serviceId: true,
+        checkInAt: true,
+        checkOutAt: true,
+        autoCheckedOutAt: true,
+        autoCheckoutReason: true,
+        scheduleShift: {
+          select: {
+            id: true,
+            scheduleDate: true,
+            plannedStart: true,
+            plannedEnd: true,
+            service: {
+              select: {
+                serviceCode: true,
+                serviceName: true,
+              },
+            },
+          },
+        },
+        individual: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+        dsp: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+        service: {
+          select: {
+            serviceCode: true,
+            serviceName: true,
+          },
+        },
+        awakeEventLogs: {
+          select: {
+            eventType: true,
+          },
+        },
+      },
+    });
+
+    const mapped = visits.map((v: any) => {
+      const reminderCount = v.awakeEventLogs.filter(
+        (x: any) => x.eventType === 'REMINDER_SENT',
+      ).length;
+
+      const confirmCount = v.awakeEventLogs.filter(
+        (x: any) => x.eventType === 'CONFIRMED_AWAKE',
+      ).length;
+
+      const hasAutoCheckoutFail = v.awakeEventLogs.some(
+        (x: any) => x.eventType === 'AUTO_CHECKOUT_FAIL_CONFIRM',
+      );
+
+      const hasManualCheckout = v.awakeEventLogs.some(
+        (x: any) => x.eventType === 'MANUAL_CHECKOUT',
+      );
+
+      const status = this.computeAwakeFinalStatus({
+        reminderCount,
+        confirmCount,
+        hasAutoCheckoutFail,
+        hasManualCheckout,
+        autoCheckoutReason: v.autoCheckoutReason ?? null,
+        autoCheckedOutAt: v.autoCheckedOutAt ?? null,
+      });
+
+      const individualName = [
+        this.safeStr(v.individual?.firstName).trim(),
+        this.safeStr(v.individual?.lastName).trim(),
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+      const staffName = [
+        this.safeStr(v.dsp?.firstName).trim(),
+        this.safeStr(v.dsp?.lastName).trim(),
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+      const serviceCode =
+        v.scheduleShift?.service?.serviceCode ?? v.service?.serviceCode ?? '';
+
+      const serviceName =
+        v.scheduleShift?.service?.serviceName ?? v.service?.serviceName ?? '';
+
+      return {
+        id: v.id,
+        date: v.checkInAt,
+        dateLocal: v.checkInAt ? this.toLocalISODate(v.checkInAt) : '',
+        individualId: v.individualId,
+        individualName: individualName || '—',
+        staffId: v.dspId,
+        staffName: staffName || '—',
+        serviceCode,
+        serviceName,
+        scheduleStart: v.scheduleShift?.plannedStart
+          ? this.toLocalTimeHHmm(v.scheduleShift.plannedStart)
+          : '',
+        scheduleEnd: v.scheduleShift?.plannedEnd
+          ? this.toLocalTimeHHmm(v.scheduleShift.plannedEnd)
+          : '',
+        visitStart: v.checkInAt ? this.toLocalTimeHHmm(v.checkInAt) : '',
+        visitEnd: v.checkOutAt ? this.toLocalTimeHHmm(v.checkOutAt) : '',
+        reminderCount,
+        confirmCount,
+        status,
+        autoCheckoutReason: v.autoCheckoutReason ?? null,
+        autoCheckedOutAt: v.autoCheckedOutAt ?? null,
+      };
+    });
+
+    if (filter.status && String(filter.status).trim() !== '') {
+      const wanted = String(filter.status).trim().toUpperCase();
+      return mapped.filter((x) => x.status === wanted);
+    }
+
+    return mapped;
+  }
+
+  async getAwakeReportDetail(id: string) {
+    const v = await this.prisma.visit.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        scheduleShiftId: true,
+        individualId: true,
+        dspId: true,
+        serviceId: true,
+        checkInAt: true,
+        checkOutAt: true,
+        autoCheckedOutAt: true,
+        autoCheckoutReason: true,
+        scheduleShift: {
+          select: {
+            id: true,
+            scheduleDate: true,
+            plannedStart: true,
+            plannedEnd: true,
+            service: {
+              select: {
+                serviceCode: true,
+                serviceName: true,
+              },
+            },
+          },
+        },
+        individual: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+        dsp: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+        service: {
+          select: {
+            serviceCode: true,
+            serviceName: true,
+          },
+        },
+        awakeEventLogs: {
+          select: {
+            eventType: true,
+          },
+        },
+      },
+    });
+
+    if (!v) return null;
+
+    const reminderCount = v.awakeEventLogs.filter(
+      (x: any) => x.eventType === 'REMINDER_SENT',
+    ).length;
+
+    const confirmCount = v.awakeEventLogs.filter(
+      (x: any) => x.eventType === 'CONFIRMED_AWAKE',
+    ).length;
+
+    const hasAutoCheckoutFail = v.awakeEventLogs.some(
+      (x: any) => x.eventType === 'AUTO_CHECKOUT_FAIL_CONFIRM',
+    );
+
+    const hasManualCheckout = v.awakeEventLogs.some(
+      (x: any) => x.eventType === 'MANUAL_CHECKOUT',
+    );
+
+    const status = this.computeAwakeFinalStatus({
+      reminderCount,
+      confirmCount,
+      hasAutoCheckoutFail,
+      hasManualCheckout,
+      autoCheckoutReason: v.autoCheckoutReason ?? null,
+      autoCheckedOutAt: v.autoCheckedOutAt ?? null,
+    });
+
+    const individualName = [
+      this.safeStr(v.individual?.firstName).trim(),
+      this.safeStr(v.individual?.lastName).trim(),
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    const staffName = [
+      this.safeStr(v.dsp?.firstName).trim(),
+      this.safeStr(v.dsp?.lastName).trim(),
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    const serviceCode =
+      v.scheduleShift?.service?.serviceCode ?? v.service?.serviceCode ?? '';
+
+    const serviceName =
+      v.scheduleShift?.service?.serviceName ?? v.service?.serviceName ?? '';
+
+    return {
+      id: v.id,
+      date: v.checkInAt,
+      dateLocal: v.checkInAt ? this.toLocalISODate(v.checkInAt) : '',
+      individualId: v.individualId,
+      individualName: individualName || '—',
+      staffId: v.dspId,
+      staffName: staffName || '—',
+      serviceCode,
+      serviceName,
+      scheduleStart: v.scheduleShift?.plannedStart
+        ? this.toLocalTimeHHmm(v.scheduleShift.plannedStart)
+        : '',
+      scheduleEnd: v.scheduleShift?.plannedEnd
+        ? this.toLocalTimeHHmm(v.scheduleShift.plannedEnd)
+        : '',
+      visitStart: v.checkInAt ? this.toLocalTimeHHmm(v.checkInAt) : '',
+      visitEnd: v.checkOutAt ? this.toLocalTimeHHmm(v.checkOutAt) : '',
+      reminderCount,
+      confirmCount,
+      status,
+      autoCheckoutReason: v.autoCheckoutReason ?? null,
+      autoCheckedOutAt: v.autoCheckedOutAt ?? null,
+    };
+  }
+
+  async getAwakeTimeline(id: string) {
+    const exists = await this.prisma.visit.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!exists) return null;
+
+    const rows = await (this.prisma as any).awakeEventLog.findMany({
+      where: { visitId: id },
+      orderBy: { eventTime: 'asc' },
+      select: {
+        id: true,
+        eventType: true,
+        eventTime: true,
+        note: true,
+        meta: true,
+        createdAt: true,
+      },
+    });
+
+    return rows.map((x: any) => ({
+      ...x,
+      eventTimeLocal: x.eventTime ? this.toLocalDateTime(x.eventTime) : '',
+      createdAtLocal: x.createdAt ? this.toLocalDateTime(x.createdAt) : '',
+    }));
+  }
+
   async getHealthIncidentReports(filter: HealthIncidentFilter) {
     const from = this.normalizeDateInput(filter.from);
     const to = this.normalizeDateInput(filter.to);
@@ -1133,7 +1653,9 @@ export class ReportsService {
     }
 
     const where: any = {};
-    if (gte || lt) where.date = { ...(gte ? { gte } : {}), ...(lt ? { lt } : {}) };
+    if (gte || lt) {
+      where.date = { ...(gte ? { gte } : {}), ...(lt ? { lt } : {}) };
+    }
     if (filter.staffId) where.staffId = filter.staffId;
     if (filter.individualId) where.individualId = filter.individualId;
     if (filter.status && String(filter.status).trim() !== '') {
@@ -1248,7 +1770,7 @@ export class ReportsService {
     }));
   }
 
-    async getHealthIncidentAttachmentForDownload(
+  async getHealthIncidentAttachmentForDownload(
     reportId: string,
     attachmentId: string,
   ) {
@@ -1303,7 +1825,10 @@ export class ReportsService {
     return absPath;
   }
 
-  async addHealthIncidentAttachment(id: string, body: HealthIncidentAttachmentInput) {
+  async addHealthIncidentAttachment(
+    id: string,
+    body: HealthIncidentAttachmentInput,
+  ) {
     const exists = await this.prisma.healthIncidentReport.findUnique({
       where: { id },
       select: { id: true },
@@ -1370,11 +1895,13 @@ export class ReportsService {
 
     return {
       ...created,
-      createdAtLocal: created.createdAt ? this.toLocalDateTime(created.createdAt) : '',
+      createdAtLocal: created.createdAt
+        ? this.toLocalDateTime(created.createdAt)
+        : '',
     };
   }
 
-    private sanitizeUploadFileName(fileName: string): string {
+  private sanitizeUploadFileName(fileName: string): string {
     const base = this.safeStr(fileName).trim() || 'attachment';
     return base
       .replace(/[\\\/:*?"<>|]+/g, '_')
@@ -1473,7 +2000,8 @@ export class ReportsService {
     fs.writeFileSync(absoluteFilePath, file.buffer);
 
     const category = this.asText(body.category) || 'CI_EVIDENCE';
-    const fileName = this.sanitizeUploadFileName(file.originalname) || 'attachment';
+    const fileName =
+      this.sanitizeUploadFileName(file.originalname) || 'attachment';
     const mimeType = this.asText(file.mimetype) || null;
     const fileSize =
       typeof file.size === 'number' && Number.isFinite(file.size)
@@ -1529,9 +2057,12 @@ export class ReportsService {
 
     return {
       ...created,
-      createdAtLocal: created.createdAt ? this.toLocalDateTime(created.createdAt) : '',
+      createdAtLocal: created.createdAt
+        ? this.toLocalDateTime(created.createdAt)
+        : '',
     };
   }
+
   async saveHealthIncidentReview(
     id: string,
     body: {
@@ -1561,9 +2092,12 @@ export class ReportsService {
       data.status = String(body.status).trim();
     }
 
-    if (body.supervisorName !== undefined) data.supervisorName = body.supervisorName;
-    if (body.supervisorDecision !== undefined) data.supervisorDecision = body.supervisorDecision;
-    if (body.supervisorActionsTaken !== undefined) data.supervisorActionsTaken = body.supervisorActionsTaken;
+    if (body.supervisorName !== undefined)
+      data.supervisorName = body.supervisorName;
+    if (body.supervisorDecision !== undefined)
+      data.supervisorDecision = body.supervisorDecision;
+    if (body.supervisorActionsTaken !== undefined)
+      data.supervisorActionsTaken = body.supervisorActionsTaken;
 
     if (
       data.status !== undefined ||
@@ -1643,13 +2177,18 @@ export class ReportsService {
       investigatedAt: new Date(),
     };
 
-    if (body.investigationFindings !== undefined) data.investigationFindings = body.investigationFindings;
+    if (body.investigationFindings !== undefined)
+      data.investigationFindings = body.investigationFindings;
     if (body.rootCause !== undefined) data.rootCause = body.rootCause;
     if (body.witnessNotes !== undefined) data.witnessNotes = body.witnessNotes;
-    if (body.correctiveActions !== undefined) data.correctiveActions = body.correctiveActions;
-    if (body.recommendation !== undefined) data.recommendation = body.recommendation;
-    if (body.investigatedByStaffId !== undefined) data.investigatedByStaffId = body.investigatedByStaffId;
-    if (body.investigatedByName !== undefined) data.investigatedByName = body.investigatedByName;
+    if (body.correctiveActions !== undefined)
+      data.correctiveActions = body.correctiveActions;
+    if (body.recommendation !== undefined)
+      data.recommendation = body.recommendation;
+    if (body.investigatedByStaffId !== undefined)
+      data.investigatedByStaffId = body.investigatedByStaffId;
+    if (body.investigatedByName !== undefined)
+      data.investigatedByName = body.investigatedByName;
 
     const updated = await this.prisma.healthIncidentReport.update({
       where: { id },
@@ -1736,15 +2275,20 @@ export class ReportsService {
       closedAt: new Date(),
     };
 
-    if (body.supervisorName !== undefined) data.supervisorName = body.supervisorName;
-    if (body.supervisorDecision !== undefined) data.supervisorDecision = body.supervisorDecision;
-    if (body.supervisorActionsTaken !== undefined) data.supervisorActionsTaken = body.supervisorActionsTaken;
-    if (body.finalDecision !== undefined) data.finalDecision = body.finalDecision;
+    if (body.supervisorName !== undefined)
+      data.supervisorName = body.supervisorName;
+    if (body.supervisorDecision !== undefined)
+      data.supervisorDecision = body.supervisorDecision;
+    if (body.supervisorActionsTaken !== undefined)
+      data.supervisorActionsTaken = body.supervisorActionsTaken;
+    if (body.finalDecision !== undefined)
+      data.finalDecision = body.finalDecision;
     if (body.finalSummary !== undefined) data.finalSummary = body.finalSummary;
     if (typeof body.allowDspViewOutcome === 'boolean') {
       data.allowDspViewOutcome = body.allowDspViewOutcome;
     }
-    if (body.closedByUserId !== undefined) data.closedByUserId = body.closedByUserId;
+    if (body.closedByUserId !== undefined)
+      data.closedByUserId = body.closedByUserId;
     if (body.closedByName !== undefined) data.closedByName = body.closedByName;
 
     const updated = await this.prisma.healthIncidentReport.update({
@@ -1760,7 +2304,11 @@ export class ReportsService {
       actionType: 'CASE_CLOSED',
       actorUserId: body.actorUserId || body.closedByUserId || null,
       actorName:
-        body.actorName || body.closedByName || body.supervisorName || updated.supervisorName || null,
+        body.actorName ||
+        body.closedByName ||
+        body.supervisorName ||
+        updated.supervisorName ||
+        null,
       actorRole: 'SUPERVISOR',
       note: 'Case closed',
       meta: {
@@ -1829,10 +2377,14 @@ export class ReportsService {
     if (body.ciEmail !== undefined) data.ciEmail = body.ciEmail;
     if (body.ciPhone !== undefined) data.ciPhone = body.ciPhone;
 
-    if (body.ciAssignedByUserId && String(body.ciAssignedByUserId).trim() !== '') {
+    if (
+      body.ciAssignedByUserId &&
+      String(body.ciAssignedByUserId).trim() !== ''
+    ) {
       data.ciAssignedByUserId = String(body.ciAssignedByUserId).trim();
     }
-    if (body.ciAssignedByName !== undefined) data.ciAssignedByName = body.ciAssignedByName;
+    if (body.ciAssignedByName !== undefined)
+      data.ciAssignedByName = body.ciAssignedByName;
 
     const updated = await this.prisma.healthIncidentReport.update({
       where: { id },
@@ -1897,7 +2449,9 @@ export class ReportsService {
     }
 
     try {
-      const dateLocal = (updated as any).date ? this.toLocalISODate((updated as any).date) : '';
+      const dateLocal = (updated as any).date
+        ? this.toLocalISODate((updated as any).date)
+        : '';
 
       console.log('[assignCI] building PDF...');
 
@@ -1917,8 +2471,12 @@ export class ReportsService {
         serviceName: (updated as any).shift?.service?.serviceName ?? null,
 
         supervisorName: this.safeStr((updated as any).supervisorName || ''),
-        supervisorDecision: this.safeStr((updated as any).supervisorDecision || ''),
-        supervisorActionsTaken: this.safeStr((updated as any).supervisorActionsTaken || ''),
+        supervisorDecision: this.safeStr(
+          (updated as any).supervisorDecision || '',
+        ),
+        supervisorActionsTaken: this.safeStr(
+          (updated as any).supervisorActionsTaken || '',
+        ),
         reviewedAt: (updated as any).reviewedAt ?? null,
 
         ciName: this.safeStr((updated as any).ciName || ''),
