@@ -38,8 +38,19 @@ export class ReportsController {
   constructor(
     private readonly reportsService: ReportsService,
     private readonly fileReportsService: FileReportsService,
-  ) {}
+  ) { }
+  @Get('awake/:id/download/:type')
+  async downloadAwakeReport(
+    @Param('id') id: string,
+    @Param('type') type: string,
+    @Res() res: Response,
+  ) {
+    if (!id || String(id).trim() === '') {
+      throw new BadRequestException('Missing id');
+    }
 
+    return this.fileReportsService.downloadAwakeReport(id, type, res);
+  }
   // =========================
   // DAILY NOTES (existing)
   // =========================

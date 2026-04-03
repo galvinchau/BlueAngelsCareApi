@@ -1,4 +1,6 @@
 // src/reports/file-reports.service.ts
+import type { Response } from 'express';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as fs from 'fs-extra';
@@ -1247,7 +1249,8 @@ export class FileReportsService {
     // Try to extract incident type from payload (best-effort)
     let incidentType = '';
     try {
-      const p = typeof rpt.payload === 'string' ? JSON.parse(rpt.payload) : rpt.payload;
+      const p =
+        typeof rpt.payload === 'string' ? JSON.parse(rpt.payload) : rpt.payload;
       incidentType =
         (p?.incidentType ||
           p?.incident_type ||
@@ -1322,9 +1325,11 @@ export class FileReportsService {
     drawWrapped('Reported by (DSP)', String(rpt.staffName || ''));
     drawWrapped('DSP Email', String(rpt.staffEmail || ''));
 
-    const svc = rpt.shift?.service?.serviceName || rpt.shift?.service?.serviceCode || '';
+    const svc =
+      rpt.shift?.service?.serviceName || rpt.shift?.service?.serviceCode || '';
     if (svc) drawWrapped('Service', String(svc));
-    if (shiftStart || shiftEnd) drawWrapped('Shift', `${shiftStart || ''} - ${shiftEnd || ''}`.trim());
+    if (shiftStart || shiftEnd)
+      drawWrapped('Shift', `${shiftStart || ''} - ${shiftEnd || ''}`.trim());
 
     drawLine('');
     drawLine('SUPERVISOR REVIEW', true, 12);
@@ -1354,7 +1359,11 @@ export class FileReportsService {
     // Footer note
     if (y > 60) {
       drawLine('');
-      drawLine('This document is confidential and intended for authorized use only.', false, 9);
+      drawLine(
+        'This document is confidential and intended for authorized use only.',
+        false,
+        9,
+      );
     }
 
     const bytes = await pdfDoc.save();
@@ -1366,5 +1375,462 @@ export class FileReportsService {
 
     const filename = `HealthIncidentReport_${dateLocal || 'date'}_${safeInd}.pdf`;
     return { filename, buffer };
+  }
+
+  // ============================================================
+  // ✅ NEW: AWAKE REPORT PDF ONLY
+  // ============================================================
+
+  private async getAwakeReportBundle(visitId: string): Promise<{
+    detail: any;
+    timeline: any[];
+  }> {
+    const visit: any = await this.prisma.visit.findUnique({
+      where: { id: visitId },
+      select: {
+        id: true,
+        checkInAt: true,
+        checkOutAt: true,
+        autoCheckedOutAt: true,
+        autoCheckoutReason: true,
+        awakeMonitoringEnabled: true,
+        awakeEventLogs: {
+          orderBy: { eventTime: 'asc' },
+          select: {
+            id: true,
+            eventType: true,
+            eventTime: true,
+            note: true,
+            meta: true,
+            createdAt: true,
+          },
+        },
+        individual: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+        dsp: {
+          select: {
+            firstName: true,
+            lastName: true,
+          },
+        },
+        service: {
+          select: {
+            serviceCode: true,
+            serviceName: true,
+          },
+        },
+        scheduleShift: {
+          select: {
+            scheduleDate: true,
+            plannedStart: true,
+            plannedEnd: true,
+            service: {
+              select: {
+                serviceCode: true,
+                serviceName: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!visit) {
+      throw new NotFoundException('Awake report not found');
+    }
+
+    const reminderCount = (visit.awakeEventLogs || []).filter(
+      (x: any) => x.eventType === 'REMINDER_SENT',
+    ).length;
+
+    const confirmCount = (visit.awakeEventLogs || []).filter(
+      (x: any) => x.eventType === 'CONFIRMED_AWAKE',
+    ).length;
+
+    const hasAutoCheckoutFail = (visit.awakeEventLogs || []).some(
+      (x: any) => x.eventType === 'AUTO_CHECKOUT_FAIL_CONFIRM',
+    );
+
+    const hasManualCheckout = (visit.awakeEventLogs || []).some(
+      (x: any) => x.eventType === 'MANUAL_CHECKOUT',
+    );
+
+    let finalStatus: 'PASSED' | 'FAILED' = 'FAILED';
+
+    if (hasAutoCheckoutFail) {
+      finalStatus = 'FAILED';
+    } else if (visit.autoCheckedOutAt || visit.autoCheckoutReason) {
+      finalStatus = 'FAILED';
+    } else if (reminderCount > 0) {
+      finalStatus = confirmCount >= reminderCount ? 'PASSED' : 'FAILED';
+    } else if (hasManualCheckout) {
+      finalStatus = 'PASSED';
+    }
+
+    const individualName = [
+      this.safeStr(visit.individual?.firstName).trim(),
+      this.safeStr(visit.individual?.lastName).trim(),
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    const staffName = [
+      this.safeStr(visit.dsp?.firstName).trim(),
+      this.safeStr(visit.dsp?.lastName).trim(),
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    const serviceCode =
+      visit.scheduleShift?.service?.serviceCode ??
+      visit.service?.serviceCode ??
+      '';
+
+    const serviceName =
+      visit.scheduleShift?.service?.serviceName ??
+      visit.service?.serviceName ??
+      '';
+
+    const detail = {
+      id: visit.id,
+      individualName: individualName || '—',
+      staffName: staffName || '—',
+      serviceCode,
+      serviceName,
+      shiftDate: visit.scheduleShift?.scheduleDate
+        ? this.localDateISO(visit.scheduleShift.scheduleDate)
+        : visit.checkInAt
+          ? this.localDateISO(visit.checkInAt)
+          : '',
+      scheduleStart: this.toLocalTimeHHmm(visit.scheduleShift?.plannedStart),
+      scheduleEnd: this.toLocalTimeHHmm(visit.scheduleShift?.plannedEnd),
+      visitStart: this.toLocalTimeHHmm(visit.checkInAt),
+      visitEnd: this.toLocalTimeHHmm(visit.checkOutAt),
+      reminderCount,
+      confirmCount,
+      finalStatus,
+      autoCheckoutReason: this.safeStr(visit.autoCheckoutReason || ''),
+      autoCheckedOutAt: visit.autoCheckedOutAt
+        ? DateTime.fromJSDate(visit.autoCheckedOutAt, { zone: 'utc' })
+            .setZone(TZ)
+            .toFormat('yyyy-LL-dd hh:mm a')
+        : '',
+    };
+
+    const timeline = (visit.awakeEventLogs || []).map((x: any) => ({
+      id: x.id,
+      eventType: x.eventType,
+      eventTimeLocal: x.eventTime
+        ? DateTime.fromJSDate(x.eventTime, { zone: 'utc' })
+            .setZone(TZ)
+            .toFormat('yyyy-LL-dd hh:mm a')
+        : '',
+      note: this.safeStr(x.note || ''),
+    }));
+
+    return { detail, timeline };
+  }
+
+  private prettyAwakeEventLabel(eventType: string): string {
+    switch (eventType) {
+      case 'CHECK_IN_AWAKE_STARTED':
+        return 'Awake started';
+      case 'REMINDER_SENT':
+        return 'Reminder sent';
+      case 'CONFIRMED_AWAKE':
+        return 'Confirmed awake';
+      case 'AUTO_CHECKOUT_FAIL_CONFIRM':
+        return 'Auto checkout fail';
+      case 'MANUAL_CHECKOUT':
+        return 'Manual checkout';
+      case 'SHIFT_COMPLETED':
+        return 'Shift completed';
+      default:
+        return eventType;
+    }
+  }
+
+  async generateAwakePdf(visitId: string): Promise<string> {
+    const { detail, timeline } = await this.getAwakeReportBundle(visitId);
+
+    const localDay = detail.shiftDate || 'unknown-date';
+    const baseDir = path.join(
+      process.cwd(),
+      'uploads',
+      'awake-reports',
+      localDay,
+      `awake_${visitId}`,
+    );
+    await fs.ensureDir(baseDir);
+
+    const absPdfPath = path.join(baseDir, 'staff.pdf');
+
+    const pdfDoc = await PDFDocument.create();
+    const page = pdfDoc.addPage([612, 792]);
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+    const marginX = 28;
+    let y = 760;
+
+    const drawText = (
+      text: string,
+      x: number,
+      yy: number,
+      size = 10,
+      bold = false,
+    ) => {
+      page.drawText(this.safeStr(text), {
+        x,
+        y: yy,
+        size,
+        font: bold ? fontBold : font,
+      });
+    };
+
+    const drawBox = (
+      label: string,
+      value: string,
+      x: number,
+      topY: number,
+      w: number,
+      h: number,
+    ) => {
+      page.drawRectangle({
+        x,
+        y: topY - h,
+        width: w,
+        height: h,
+        borderWidth: 1,
+      });
+
+      drawText(label.toUpperCase(), x + 8, topY - 12, 8, false);
+      drawText(value || '—', x + 8, topY - 28, 11, true);
+    };
+
+    // Header
+    drawText('Blue Angels Care, LLC', 82, y, 12, true);
+    drawText('MPI #: 104322079', 82, y - 16, 10);
+    drawText('3107 Beale Avenue, Altoona, PA 16601', 82, y - 30, 10);
+    drawText('Phone: (814) 600-2313', 82, y - 44, 10);
+    drawText('Email: blueangelscarellc@gmail.com', 82, y - 58, 10);
+    drawText('Website: blueangelscare.org', 82, y - 72, 10);
+
+    drawText('AWAKE REPORT', 455, y - 6, 20, true);
+    drawText(`Service Type: ${detail.serviceName || '—'}`, 420, y - 28, 10);
+
+    page.drawLine({
+      start: { x: marginX, y: y - 88 },
+      end: { x: 584, y: y - 88 },
+      thickness: 1,
+    });
+
+    y = y - 105;
+
+    // 2-column compact layout
+    const colGap = 12;
+    const colW = (612 - marginX * 2 - colGap) / 2;
+    const boxH = 42;
+
+    const leftX = marginX;
+    const rightX = marginX + colW + colGap;
+
+    const rows = [
+      ['Individual', detail.individualName, 'DSP / Staff', detail.staffName],
+      ['Service', detail.serviceName, 'Shift Date', detail.shiftDate],
+      [
+        'Schedule',
+        `${detail.scheduleStart || '—'} – ${detail.scheduleEnd || '—'}`,
+        'Visit',
+        `${detail.visitStart || '—'} – ${detail.visitEnd || '—'}`,
+      ],
+      [
+        'Reminders / Confirms',
+        `${detail.reminderCount} / ${detail.confirmCount}`,
+        'Final Status',
+        detail.finalStatus,
+      ],
+      [
+        'Auto Checkout Reason',
+        detail.autoCheckoutReason || '—',
+        'Auto Checked Out At',
+        detail.autoCheckedOutAt || '—',
+      ],
+    ];
+
+    for (const row of rows) {
+      drawBox(row[0], row[1], leftX, y, colW, boxH);
+      drawBox(row[2], row[3], rightX, y, colW, boxH);
+      y -= boxH + 10;
+    }
+
+    // Timeline title
+    y -= 6;
+    drawText('Timeline', marginX, y, 13, true);
+    drawText('Awake Monitoring event history', 450, y + 2, 8);
+    y -= 16;
+
+    // Timeline table header
+    const col1 = 26;
+    const col2 = 165;
+    const col3 = 150;
+    const col4 = 200;
+    const tableX = marginX;
+    const rowH = 20;
+
+    page.drawRectangle({
+      x: tableX,
+      y: y - rowH,
+      width: col1 + col2 + col3 + col4,
+      height: rowH,
+      borderWidth: 1,
+    });
+
+    drawText('#', tableX + 6, y - 13, 8, true);
+    drawText('EVENT', tableX + col1 + 6, y - 13, 8, true);
+    drawText('TIME', tableX + col1 + col2 + 6, y - 13, 8, true);
+    drawText('NOTE', tableX + col1 + col2 + col3 + 6, y - 13, 8, true);
+    y -= rowH;
+
+    if (!timeline.length) {
+      page.drawRectangle({
+        x: tableX,
+        y: y - 24,
+        width: col1 + col2 + col3 + col4,
+        height: 24,
+        borderWidth: 1,
+      });
+      drawText(
+        'No real timeline data found for this visit.',
+        tableX + 8,
+        y - 15,
+        9,
+      );
+      y -= 30;
+    } else {
+      timeline.slice(0, 8).forEach((item, idx) => {
+        page.drawRectangle({
+          x: tableX,
+          y: y - rowH,
+          width: col1 + col2 + col3 + col4,
+          height: rowH,
+          borderWidth: 1,
+        });
+
+        drawText(String(idx + 1), tableX + 6, y - 13, 8);
+        drawText(
+          this.prettyAwakeEventLabel(item.eventType),
+          tableX + col1 + 6,
+          y - 13,
+          8,
+        );
+        drawText(
+          this.safeStr(item.eventTimeLocal || '—').slice(0, 22),
+          tableX + col1 + col2 + 6,
+          y - 13,
+          8,
+        );
+        drawText(
+          this.safeStr(item.note || '—').slice(0, 52),
+          tableX + col1 + col2 + col3 + 6,
+          y - 13,
+          8,
+        );
+
+        y -= rowH;
+      });
+
+      y -= 6;
+      drawText(
+        'Showing real timeline events from database only.',
+        marginX,
+        y,
+        8,
+      );
+      y -= 14;
+    }
+
+    // Small note
+    const note =
+      'This document contains accurate BAC-HMS system data extracted from actual shift activity, including check-in/check-out records, awake alert events, and DSP awake confirmations when applicable. This report serves as supporting documentation for an Awake shift that Blue Angels Care monitors to support BAC service quality standards and applicable regulatory requirements.';
+
+    const noteLines: string[] = [];
+    const words = note.split(/\s+/);
+    let current = '';
+    for (const word of words) {
+      const test = current ? `${current} ${word}` : word;
+      const width = font.widthOfTextAtSize(test, 7.5);
+      if (width > 540) {
+        noteLines.push(current);
+        current = word;
+      } else {
+        current = test;
+      }
+    }
+    if (current) noteLines.push(current);
+
+    const noteBoxH = Math.max(24, noteLines.length * 10 + 10);
+    page.drawRectangle({
+      x: marginX,
+      y: y - noteBoxH,
+      width: 540,
+      height: noteBoxH,
+      borderWidth: 1,
+    });
+
+    let noteY = y - 10;
+    noteLines.forEach((line) => {
+      drawText(line, marginX + 8, noteY, 7.5);
+      noteY -= 10;
+    });
+
+    const bytes = await pdfDoc.save();
+    await fs.writeFile(absPdfPath, Buffer.from(bytes));
+    return absPdfPath;
+  }
+
+  async downloadAwakeReport(id: string, type: string, res: Response) {
+    if (type !== 'staff-pdf') {
+      throw new BadRequestException(
+        'Only staff-pdf is supported for Awake Report',
+      );
+    }
+
+    const absPdfPath = await this.generateAwakePdf(id);
+
+    if (!(await fs.pathExists(absPdfPath))) {
+      throw new NotFoundException('Awake PDF file not found on server');
+    }
+
+    const { detail } = await this.getAwakeReportBundle(id);
+
+    const date = this.safeStr(detail.shiftDate || 'date');
+    const individual = this.safeStr(detail.individualName || 'Individual')
+      .replace(/[\\/:*?"<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const service = this.safeStr(detail.serviceName || 'Service')
+      .replace(/[\\/:*?"<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const dsp = this.safeStr(detail.staffName || 'DSP')
+      .replace(/[\\/:*?"<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const downloadName = `${date} - ${individual} - ${service} - ${dsp} - Awake Report.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${downloadName}"`,
+    );
+
+    const stream = fs.createReadStream(absPdfPath);
+    stream.pipe(res);
   }
 }
