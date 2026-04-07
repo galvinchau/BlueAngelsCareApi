@@ -1,11 +1,9 @@
-// bac-hms/bac-api/prisma/schema.prisma
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql" // Dùng PostgreSQL (Supabase)
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -27,6 +25,12 @@ enum BillingPayer {
   ODP
 }
 
+// ✅ NEW: Residential placement type for House Management
+enum ResidentialPlacementType {
+  FULL_TIME_247
+  HOME_VISIT_SPLIT
+}
+
 // ✅ NEW: Claim status
 enum ClaimStatus {
   DRAFT
@@ -37,13 +41,13 @@ enum ClaimStatus {
 }
 
 model Individual {
-  id   String @id @default(cuid()) // khoá kỹ thuật
-  code String @unique // mã hiển thị, sẽ sinh từ Counter
+  id   String @id @default(cuid())
+  code String @unique
 
   firstName  String
   middleName String?
   lastName   String
-  dob        String // YYYY-MM-DD
+  dob        String
   gender     String?
   ssnLast4   String?
   medicaidId String? @db.VarChar(32)
@@ -132,6 +136,18 @@ model Individual {
   advPhysician String?
   advAttach    String?
 
+  // =====================================================
+  //  HOUSE MANAGEMENT V1 (additive only)
+  // =====================================================
+  houseId                  String?
+  residentialPlacementType ResidentialPlacementType?
+  homeVisitSchedule        String?
+  housingCoverage          String?
+  careRateTier             String?
+  roomLabel                String?
+  behaviorSupportLevel     String?
+  appointmentLoad          String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -154,37 +170,43 @@ model Individual {
 
   // ISP & BSP form (lưu toàn bộ dữ liệu form dạng JSON)
   ispBspForm IspBspForm?
+
+  // ✅ NEW: relation to House
+  house House? @relation(fields: [houseId], references: [id], onDelete: SetNull)
+
+  @@index([houseId])
+  @@index([residentialPlacementType])
 }
 
 /**
  * Employee = hồ sơ nhân viên Blue Angels Care
- * employeeId = mã hiển thị: BAC-E-2025-001 (nhập từ form, sau này có thể sinh tự động bằng Counter)
+ * employeeId = mã hiển thị: BAC-E-2025-001
  */
 model Employee {
-  id String @id @default(cuid()) // khoá kỹ thuật
+  id String @id @default(cuid())
 
   // Demographics
   firstName  String
   middleName String?
   lastName   String
-  dob        String? // YYYY-MM-DD
+  dob        String?
   gender     String?
   phone      String?
   email      String
 
-  educationLevel String? // trình độ học vấn/chuyên môn
-  ssn            String? // 9 digits
+  educationLevel String?
+  ssn            String?
 
   // Employment Info
-  employeeId      String  @unique // BAC-E-2025-001
-  role            String? // DSP / Nurse / Supervisor / ...
-  status          String? // Active / On Leave / Inactive
-  hireDate        String? // YYYY-MM-DD
-  terminationDate String? // YYYY-MM-DD
-  employmentType  String? // Full-time / Part-time / Per-diem / Contract
-  branch          String? // Altoona / Hollidaysburg / ...
-  workLocation    String? // mô tả chi tiết hơn location
-  supervisorName  String? // tên supervisor trực tiếp
+  employeeId      String  @unique
+  role            String?
+  status          String?
+  hireDate        String?
+  terminationDate String?
+  employmentType  String?
+  branch          String?
+  workLocation    String?
+  supervisorName  String?
 
   // Address
   address1 String?
@@ -202,7 +224,7 @@ model Employee {
   emergencyAddress           String?
 
   // Work Preferences
-  preferredShift  String? // Morning / Afternoon / Evening / Overnight
+  preferredShift  String?
   canWorkWeekends Boolean @default(false)
   canWorkHolidays Boolean @default(false)
   maxWeeklyHours  Int?
@@ -220,35 +242,128 @@ model Employee {
   updatedAt DateTime @updatedAt
 
   // Relations mới
-  templateDefaultShifts MasterTemplateShift[] @relation("TemplateDefaultDSP")
-  plannedShifts         ScheduleShift[]       @relation("PlannedDSP")
-  actualShifts          ScheduleShift[]       @relation("ActualDSP")
-  visits                Visit[]               @relation("VisitDSP")
+  templateDefaultShifts MasterTemplateShift[]  @relation("TemplateDefaultDSP")
+  plannedShifts         ScheduleShift[]        @relation("PlannedDSP")
+  actualShifts          ScheduleShift[]        @relation("ActualDSP")
+  visits                Visit[]                @relation("VisitDSP")
   healthIncidentReports HealthIncidentReport[]
 
   // Supervisors cho Admin Users
   userSupervisors UserSupervisor[]
 
-  isMobileUser Boolean @default(false) // 👈 THÊM DÒNG NÀY
+  isMobileUser Boolean @default(false)
 
   // ✅ NEW: refresh tokens for mobile "remember device"
   mobileRefreshTokens MobileRefreshToken[]
   mobilePushTokens    MobilePushToken[]
+
+  // =====================================================
+  //  HOUSE MANAGEMENT V1 (additive only)
+  // =====================================================
+  houseLinks          HouseEmployee[]
+  houseShiftStaffings HouseShiftStaffing[]
+}
+
+/**
+ * House Management V1
+ * Additive only, no breaking change to old system
+ */
+model House {
+  id String @id @default(cuid())
+
+  code String @unique
+  name String
+
+  programType String?
+  status      String  @default("ACTIVE")
+
+  address1 String?
+  address2 String?
+  city     String?
+  county   String?
+  state    String?
+  zip      String?
+
+  phone String?
+
+  capacity Int @default(1)
+
+  primaryOccupancyModel String?
+
+  billingNote        String?
+  careComplexityNote String?
+  notes              String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  residents      Individual[]
+  staffLinks     HouseEmployee[]
+  shiftStaffings HouseShiftStaffing[]
+
+  @@index([status])
+  @@index([county])
+}
+
+model HouseEmployee {
+  id String @id @default(cuid())
+
+  houseId    String
+  employeeId String
+
+  roleInHouse String?
+  isPrimary   Boolean @default(false)
+  isActive    Boolean @default(true)
+  notes       String?
+
+  house    House    @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([houseId, employeeId])
+  @@index([houseId, isActive])
+  @@index([employeeId, isActive])
+}
+
+model HouseShiftStaffing {
+  id String @id @default(cuid())
+
+  shiftId    String
+  houseId    String
+  employeeId String
+
+  roleInShift String?
+  isPrimary   Boolean @default(false)
+  notes       String?
+
+  shift    ScheduleShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  house    House         @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  employee Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shiftId, employeeId])
+  @@index([shiftId])
+  @@index([houseId])
+  @@index([employeeId])
 }
 
 /**
  * Payer: các đối tượng thanh toán: Primary / Secondary
  */
 model Payer {
-  id          String @id @default(cuid())
-  type        String // "Primary" | "Secondary"
+  id          String  @id @default(cuid())
+  type        String
   name        String
   plan        String?
   memberId    String
   groupId     String?
   startDate   String?
   endDate     String?
-  eligibility String? // Verified | Pending | Not Eligible
+  eligibility String?
   notes       String?
 
   individualId String
@@ -261,7 +376,7 @@ model Payer {
  * Medications
  */
 model Medication {
-  id       String @id @default(cuid())
+  id       String  @id @default(cuid())
   name     String
   dose     String?
   schedule String?
@@ -274,58 +389,41 @@ model Medication {
  * Diagnoses (ICD)
  */
 model Diagnosis {
-  id          String @id @default(cuid())
+  id          String  @id @default(cuid())
   icd         String
   description String?
-  onset       String? // YYYY-MM-DD
+  onset       String?
 
   individualId String
   individual   Individual @relation(fields: [individualId], references: [id], onDelete: Cascade)
 }
 
 /**
- * Counter dùng để sinh code: IND-2025-000001, IND-2025-000002, ...
- * (sau này có thể xài chung cho Employee, ví dụ id = "EMP-2025")
+ * Counter dùng để sinh code
  */
 model Counter {
-  id    String @id // ví dụ: "IND-2025"
+  id    String @id
   value Int
 }
 
 /**
- * Service = danh mục dịch vụ (dùng cho Accepted Services + scheduling + billing)
+ * Service = danh mục dịch vụ
  */
 model Service {
-  id String @id @default(cuid()) // technical id
+  id String @id @default(cuid())
 
-  // Short code dùng chung với Accepted Services (PCA, NT, PBIS...)
-  serviceCode String @unique // e.g. "PCA"
-
-  // Tên đầy đủ: "Personal Care Assistant"
+  serviceCode String  @unique
   serviceName String
-
-  // Mã billing / code show cho payer (SVC-001, T1019...)
   billingCode String?
-
-  // "None-Residential" | "Residential service"
-  category String
-
-  // Mô tả dịch vụ
+  category    String
   description String?
-
-  // "Active" | "Inactive"
-  status String
-
-  // Có dùng để claim/billing không
-  billable Boolean @default(true)
-
-  // Ghi chú nội bộ
-  notes String?
+  status      String
+  billable    Boolean @default(true)
+  notes       String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relations mới
   masterTemplateShifts MasterTemplateShift[]
   scheduleShifts       ScheduleShift[]
   visits               Visit[]
@@ -339,9 +437,7 @@ model Service {
 }
 
 /**
- * Authorization = quản lý ủy quyền dịch vụ theo Individual + Service
- * NOTE:
- * giữ kiểu payer = String để tương thích DB hiện tại bên web/schema đang dùng
+ * Authorization
  */
 model Authorization {
   id String @id @default(cuid())
@@ -368,10 +464,9 @@ model Authorization {
   used      Float @default(0)
   remaining Float @default(0)
 
-  // historical snapshot fields
   snapshotThroughDate DateTime?
-  manualUsed          Float @default(0)
-  manualMissed        Float @default(0)
+  manualUsed          Float     @default(0)
+  manualMissed        Float     @default(0)
 
   status String @default("PENDING")
   source String @default("MANUAL")
@@ -404,10 +499,7 @@ model Authorization {
 }
 
 /**
- * ServiceRate = bảng rate setup cho billing
- * - Hiện tại chỉ dùng payer = ODP
- * - Service phải bám đúng bảng Service BAC đang dùng
- * - Cho phép nhiều rate theo thời gian cho cùng 1 service
+ * ServiceRate
  */
 model ServiceRate {
   id String @id @default(cuid())
@@ -419,19 +511,16 @@ model ServiceRate {
 
   rate Float
 
-  // ✅ NEW: production-ready fields
   effectiveFrom DateTime
   effectiveTo   DateTime?
-  isActive      Boolean @default(true)
+  isActive      Boolean   @default(true)
 
   notes String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Không cho trùng cùng 1 service + payer + effectiveFrom
   @@unique([payer, serviceId, effectiveFrom], name: "service_rate_payer_service_effective_from_unique")
-
   @@index([payer])
   @@index([serviceId])
   @@index([payer, serviceId])
@@ -445,18 +534,18 @@ model ServiceRate {
 // =====================================================
 
 enum ScheduleStatus {
-  NOT_STARTED // chưa đến giờ, chưa có visit
-  IN_PROGRESS // đã check in, chưa check out
-  COMPLETED // có visit đầy đủ, đã đối soát
-  NOT_COMPLETED // có check in nhưng hết ca mà chưa check out
-  CANCELLED // ca bị hủy (thường do Individual)
-  BACKUP_PLAN // ca có backup DSP thay thế DSP gốc
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  NOT_COMPLETED
+  CANCELLED
+  BACKUP_PLAN
 }
 
 enum VisitSource {
-  MOBILE // DSP check in/out từ app điện thoại
-  OFFICE_EDIT // văn phòng nhập / chỉnh tay
-  AUTO_MATCH // hệ thống tự gắn visit với ca schedule
+  MOBILE
+  OFFICE_EDIT
+  AUTO_MATCH
 }
 
 enum CancelledBy {
@@ -475,21 +564,21 @@ enum AwakeEventType {
 }
 
 // =====================================================
-//  MASTER SCHEDULE TEMPLATE (lịch cứng – Master Week)
+//  MASTER SCHEDULE TEMPLATE
 // =====================================================
 
 model MasterScheduleTemplate {
   id            String    @id @default(cuid())
   individualId  String
-  name          String? // VD: "Weekday template"
-  effectiveFrom DateTime // ngày bắt đầu áp dụng
-  effectiveTo   DateTime? // null = áp dụng vô thời hạn
+  name          String?
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
   isActive      Boolean   @default(true)
   notes         String?
 
-  individual    Individual             @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  individual    Individual            @relation(fields: [individualId], references: [id], onDelete: Cascade)
   shifts        MasterTemplateShift[]
-  scheduleWeeks ScheduleWeek[] // đầu kia của relation
+  scheduleWeeks ScheduleWeek[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -500,14 +589,12 @@ model MasterScheduleTemplate {
 model MasterTemplateShift {
   id         String @id @default(cuid())
   templateId String
-  dayOfWeek  Int // 0 = Sun, 6 = Sat
+  dayOfWeek  Int
   serviceId  String
 
-  // Thời gian trong ngày, tính theo phút từ 00:00 (VD: 7h = 420)
   startMinutes Int
   endMinutes   Int
 
-  // DSP mặc định (có thể null, thực tế assign ở Weekly)
   defaultDspId String?
   billable     Boolean @default(true)
   notes        String?
@@ -523,18 +610,18 @@ model MasterTemplateShift {
 }
 
 // =====================================================
-//  WEEKLY SCHEDULE (PLAN) – hiển thị ở Weekly Detail
+//  WEEKLY SCHEDULE
 // =====================================================
 
 model ScheduleWeek {
   id                    String   @id @default(cuid())
   individualId          String
-  templateId            String? // generate từ template nào (nếu có)
-  weekStart             DateTime // Chủ nhật 00:00
-  weekEnd               DateTime // Thứ 7 23:59 hoặc weekStart + 7 ngày
+  templateId            String?
+  weekStart             DateTime
+  weekEnd               DateTime
   generatedFromTemplate Boolean  @default(true)
   notes                 String?
-  locked                Boolean  @default(false) // đã khóa khi payroll/billing xong
+  locked                Boolean  @default(false)
 
   individual Individual              @relation(fields: [individualId], references: [id], onDelete: Cascade)
   template   MasterScheduleTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
@@ -552,13 +639,12 @@ model ScheduleShift {
   individualId String
   serviceId    String
 
-  // DSP gốc (plan) và DSP thực tế (backup hoặc trùng luôn)
   plannedDspId String?
   actualDspId  String?
 
-  scheduleDate DateTime // ngày của ca (00:00)
-  plannedStart DateTime // thời gian bắt đầu plan
-  plannedEnd   DateTime // thời gian kết thúc plan
+  scheduleDate DateTime
+  plannedStart DateTime
+  plannedEnd   DateTime
 
   awakeMonitoringRequired Boolean @default(false)
 
@@ -568,7 +654,7 @@ model ScheduleShift {
   cancelledAt  DateTime?
   cancelReason String?
 
-  backupNote String? // "ABC replacing Garret due to ..."
+  backupNote String?
 
   billable Boolean @default(true)
   notes    String?
@@ -582,8 +668,10 @@ model ScheduleShift {
 
   visits                Visit[]
   healthIncidentReports HealthIncidentReport[]
-  createdAt             DateTime               @default(now())
-  updatedAt             DateTime               @updatedAt
+  houseShiftStaffings   HouseShiftStaffing[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([weekId])
   @@index([scheduleDate])
@@ -593,13 +681,13 @@ model ScheduleShift {
 }
 
 // =====================================================
-//  VISIT (thực tế – Check in/Out) – cho Billing & Payroll
+//  VISIT
 // =====================================================
 
 model Visit {
   id String @id @default(cuid())
 
-  scheduleShiftId String? // có thể null nếu là unscheduled / backup chưa gắn ca
+  scheduleShiftId String?
   individualId    String
   dspId           String
   serviceId       String?
@@ -609,7 +697,6 @@ model Visit {
 
   source VisitSource @default(MOBILE)
 
-  // cache sẵn để report nhanh (tính khi close visit)
   durationMinutes   Int?
   units             Int?
   isBillable        Boolean @default(true)
@@ -621,7 +708,7 @@ model Visit {
   reviewedAt DateTime?
 
   // =====================================================
-  //  AWAKE MONITORING (Phase 1)
+  //  AWAKE MONITORING
   // =====================================================
 
   awakeMonitoringEnabled Boolean @default(false)
@@ -638,16 +725,15 @@ model Visit {
   autoCheckedOutAt   DateTime?
   autoCheckoutReason String?
 
-  // ✅ ADD: lock after claim creation
-  isClaimLocked Boolean  @default(false)
+  isClaimLocked Boolean   @default(false)
   claimedAt     DateTime?
 
-  scheduleShift   ScheduleShift?   @relation(fields: [scheduleShiftId], references: [id])
-  individual      Individual       @relation(fields: [individualId], references: [id], onDelete: Cascade)
-  dsp             Employee         @relation("VisitDSP", fields: [dspId], references: [id])
-  service         Service?         @relation(fields: [serviceId], references: [id])
-  claimItem       ClaimItem?
-  awakeEventLogs  AwakeEventLog[]
+  scheduleShift  ScheduleShift?  @relation(fields: [scheduleShiftId], references: [id])
+  individual     Individual      @relation(fields: [individualId], references: [id], onDelete: Cascade)
+  dsp            Employee        @relation("VisitDSP", fields: [dspId], references: [id])
+  service        Service?        @relation(fields: [serviceId], references: [id])
+  claimItem      ClaimItem?
+  awakeEventLogs AwakeEventLog[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -662,7 +748,7 @@ model AwakeEventLog {
   id String @id @default(cuid())
 
   visitId String
-  visit   Visit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+  visit   Visit  @relation(fields: [visitId], references: [id], onDelete: Cascade)
 
   scheduleShiftId String?
   individualId    String
@@ -670,7 +756,7 @@ model AwakeEventLog {
   serviceId       String?
 
   eventType AwakeEventType
-  eventTime DateTime @default(now())
+  eventTime DateTime       @default(now())
 
   note String?
   meta Json?
@@ -703,8 +789,8 @@ model Claim {
   serviceDateTo   DateTime?
 
   itemCount   Int     @default(0)
-  totalUnits  Decimal @db.Decimal(10, 2) @default(0)
-  totalAmount Decimal @db.Decimal(12, 2) @default(0)
+  totalUnits  Decimal @default(0) @db.Decimal(10, 2)
+  totalAmount Decimal @default(0) @db.Decimal(12, 2)
 
   submittedAt DateTime?
   paidAt      DateTime?
@@ -746,9 +832,9 @@ model ClaimItem {
   serviceId       String
 
   visitDate DateTime
-  units     Decimal @db.Decimal(10, 2)
-  rate      Decimal @db.Decimal(10, 2)
-  amount    Decimal @db.Decimal(12, 2)
+  units     Decimal  @db.Decimal(10, 2)
+  rate      Decimal  @db.Decimal(10, 2)
+  amount    Decimal  @db.Decimal(12, 2)
 
   startTime DateTime?
   endTime   DateTime?
@@ -771,23 +857,20 @@ model ClaimItem {
 }
 
 // =====================================================
-//  DAILY NOTE (mới – chỉ lưu scalar ID + cache)
+//  DAILY NOTE
 // =====================================================
 
 model DailyNote {
   id String @id @default(cuid())
 
-  // Liên kết
   shiftId      String
   visitId      String?
   individualId String
   staffId      String
   serviceId    String?
 
-  // Ngày cung cấp dịch vụ (Daily Note)
   date DateTime
 
-  // Thông tin cache để show ở Reports cho nhanh
   individualName String
   staffName      String?
   serviceCode    String
@@ -797,19 +880,15 @@ model DailyNote {
   visitStart     String?
   visitEnd       String?
 
-  // Mileage / cancel
   mileage      Float?
   isCanceled   Boolean @default(false)
   cancelReason String?
 
-  // Toàn bộ payload Daily Note (bao gồm notes, meals, signatures...)
   payload Json
 
-  // Sau này Phase DOC/PDF sẽ dùng 2 field này
   staffReportFileId      String?
   individualReportFileId String?
 
-  // NEW: direct-download report paths (saved on server filesystem)
   staffReportDocPath      String?
   staffReportPdfPath      String?
   individualReportDocPath String?
@@ -824,11 +903,11 @@ model DailyNote {
 }
 
 // =====================================================
-//  ISP ALLOCATION (Hợp đồng ISP – units được cấp)
+//  ISP ALLOCATION
 // =====================================================
 
 model ISPAllocation {
-  id           String @id @default(cuid())
+  id           String  @id @default(cuid())
   individualId String
   serviceId    String
   payerId      String?
@@ -853,7 +932,7 @@ model ISPAllocation {
 }
 
 // =====================================================
-//  ISP & BSP FORM (lưu toàn bộ form dạng JSON)
+//  ISP & BSP FORM
 // =====================================================
 
 model IspBspForm {
@@ -883,7 +962,6 @@ model User {
   privileges  UserPrivilege[]
   supervisors UserSupervisor[]
 
-  // ====== NEW: password fields ======
   passwordHash      String?
   passwordSalt      String?
   passwordUpdatedAt DateTime?
@@ -956,23 +1034,20 @@ model UserSupervisor {
 }
 
 // =====================================================
-//  MEDICATION MODULE (Orders, MAR, Inventory, Incidents)
+//  MEDICATION MODULE
 // =====================================================
 
-// Loại order: thuốc lịch (Scheduled) hay PRN
 enum MedicationType {
   SCHEDULED
   PRN
 }
 
-// Trạng thái order
 enum MedicationOrderStatus {
   ACTIVE
   ON_HOLD
   DISCONTINUED
 }
 
-// Trạng thái từng lần uống/tiêm trong MAR
 enum MedicationAdminStatus {
   SCHEDULED
   GIVEN
@@ -983,24 +1058,18 @@ enum MedicationAdminStatus {
   ERROR
 }
 
-// Mức độ nghiêm trọng của incident
 enum MedicationIncidentSeverity {
   LOW
   MODERATE
   HIGH
 }
 
-// Trạng thái xử lý incident
 enum MedicationIncidentStatus {
   OPEN
   IN_REVIEW
   CLOSED
 }
 
-/**
- * MedicationOrder = y lệnh thuốc (đơn thuốc) cho từng Individual
- * ✅ FIX: Map fields to DB lowercase columns so we DON'T change production DB
- */
 model MedicationOrder {
   id String @id @default(cuid())
 
@@ -1032,10 +1101,6 @@ model MedicationOrder {
   @@map("MedicationOrder")
 }
 
-/**
- * MedicationAdministration = mỗi lần cấp thuốc trong MAR
- * ✅ FIX: map DB columns
- */
 model MedicationAdministration {
   id String @id @default(cuid())
 
@@ -1059,10 +1124,6 @@ model MedicationAdministration {
   @@map("MedicationAdministration")
 }
 
-/**
- * MedicationInventory = tồn kho thuốc theo từng Individual
- * ✅ FIX: map DB columns
- */
 model MedicationInventory {
   id String @id @default(cuid())
 
@@ -1086,10 +1147,6 @@ model MedicationInventory {
   @@map("MedicationInventory")
 }
 
-/**
- * MedicationIncident = lỗi thuốc, Missed dose, Medication error...
- * ✅ FIX: map DB columns
- */
 model MedicationIncident {
   id String @id @default(cuid())
 
@@ -1112,25 +1169,19 @@ model MedicationIncident {
 }
 
 model MobileLoginOtp {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   email     String
   code      String
   staffId   String
   staffName String
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([email])
   @@index([email, code])
 }
 
-//
-// ✅ NEW: Mobile Refresh Tokens (Remember device for 90 days)
-// - Store hash only (tokenHash)
-// - staffId links to Employee.id (DSP)
-// - expiresAt enforces 90-day re-verify requirement
-//
 model MobileRefreshToken {
   id        String @id @default(cuid())
   staffId   String
@@ -1153,25 +1204,21 @@ model MobileRefreshToken {
 model MobilePushToken {
   id String @id @default(cuid())
 
-  // Link to Employee.id (same style as MobileRefreshToken.staffId)
   staffId String
   staff   Employee @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
-  // Expo token, e.g. ExponentPushToken[xxxxxxxx]
   expoPushToken String
 
-  // Optional device metadata
   platform   String?
   deviceId   String?
   deviceName String?
   appVersion String?
 
-  // Token state
   isActive   Boolean  @default(true)
   lastSeenAt DateTime @default(now())
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
   revokedAt DateTime?
 
   @@unique([expoPushToken])
@@ -1182,9 +1229,7 @@ model MobilePushToken {
 }
 
 // =====================================================
-//  TIME KEEPING (OFFICE STAFF ONLY)
-//  - Raw attendance events (GPS required)
-//  - Weekly approvals (ADMIN/HR locks final hours)
+//  TIME KEEPING
 // =====================================================
 
 enum OfficeAttendanceSource {
@@ -1200,7 +1245,6 @@ enum OfficeWeeklyApprovalStatus {
 model OfficeAttendanceEvent {
   id String @id @default(cuid())
 
-  // Use Employee.employeeId as staffId (unique)
   staffId    String
   staffEmail String?
   staffName  String?
@@ -1208,7 +1252,6 @@ model OfficeAttendanceEvent {
   checkInAt  DateTime
   checkOutAt DateTime?
 
-  // GPS capture (required for check-in/out)
   checkInLat      Float?
   checkInLng      Float?
   checkInAccuracy Float?
@@ -1219,7 +1262,6 @@ model OfficeAttendanceEvent {
 
   source OfficeAttendanceSource @default(WEB)
 
-  // Flags: ["AUTO_CHECKOUT_5PM", "WEEKEND_BLOCKED", "LOW_GPS_ACCURACY", ...]
   flags String[] @default([])
 
   createdAt DateTime @default(now())
@@ -1236,13 +1278,10 @@ model OfficeWeeklyApproval {
   weekStart DateTime
   weekEnd   DateTime
 
-  computedMinutes Int @default(0)
+  computedMinutes Int  @default(0)
   adjustedMinutes Int?
-  finalMinutes    Int @default(0)
+  finalMinutes    Int  @default(0)
 
-  // ✅ NEW – per-day adjustment map
-  // IMPORTANT: Canonical table is "OfficeWeeklyApproval" (camelCase)
-  // so the column is dailyAdjustments (camelCase), NOT daily_adjustments.
   dailyAdjustments Json?
 
   status OfficeWeeklyApprovalStatus @default(PENDING)
@@ -1263,13 +1302,12 @@ model OfficeWeeklyApproval {
 }
 
 // =====================================================
-//  PAYROLL (Runs, Rows, Rates)
+//  PAYROLL
 // =====================================================
 
 model PayrollRate {
   id String @id @default(cuid())
 
-  // Match Employee.employeeId (BAC-E-...)
   employeeId String @unique
 
   rate         Float?
@@ -1332,7 +1370,7 @@ model PayrollRow {
 }
 
 // =====================================================
-//  HEALTH & INCIDENT (Mobile Form + Case Workflow)
+//  HEALTH & INCIDENT
 // =====================================================
 
 enum HealthIncidentReportStatus {
@@ -1349,40 +1387,32 @@ enum HealthIncidentReportStatus {
 model HealthIncidentReport {
   id String @id @default(cuid())
 
-  // ✅ NEW: human-friendly case number
   caseNumber String? @unique
 
-  // Optional link to shift
   shiftId String?
   shift   ScheduleShift? @relation(fields: [shiftId], references: [id], onDelete: SetNull)
 
-  // DSP who submitted
   staffId    String
   staff      Employee @relation(fields: [staffId], references: [id], onDelete: Restrict)
   staffName  String?
   staffEmail String?
 
-  // Optional client info snapshot
   individualId   String?
   individual     Individual? @relation(fields: [individualId], references: [id], onDelete: SetNull)
   individualName String?
 
-  // service date (local day)
   date DateTime
 
   status      HealthIncidentReportStatus @default(SUBMITTED)
   submittedAt DateTime?
 
-  // full Word-form payload
   payload Json
 
-  // Supervisor section
   supervisorName         String?
   supervisorDecision     String?
   supervisorActionsTaken String?
   reviewedAt             DateTime?
 
-  // ✅ NEW: CI Assignment (Supervisor assigns Certified Investigator)
   ciName  String?
   ciEmail String?
   ciPhone String?
@@ -1391,7 +1421,6 @@ model HealthIncidentReport {
   ciAssignedByUserId String?
   ciAssignedByName   String?
 
-  // ✅ NEW: CI Investigation section
   investigationFindings String?
   rootCause             String?
   witnessNotes          String?
@@ -1402,7 +1431,6 @@ model HealthIncidentReport {
   investigatedByStaffId String?
   investigatedByName    String?
 
-  // ✅ NEW: case visibility / final close summary
   allowDspViewOutcome Boolean @default(false)
   finalDecision       String?
   finalSummary        String?
@@ -1411,11 +1439,9 @@ model HealthIncidentReport {
   closedByUserId String?
   closedByName   String?
 
-  // ✅ NEW: direct-download report paths (saved on server filesystem)
   staffReportDocPath String?
   staffReportPdfPath String?
 
-  // ✅ NEW: timeline + attachments
   caseLogs    HealthIncidentCaseLog[]
   attachments HealthIncidentAttachment[]
 
@@ -1426,12 +1452,10 @@ model HealthIncidentReport {
   @@index([status])
   @@index([staffId, date])
   @@index([individualId, date])
-
   @@index([shiftId])
   @@index([ciAssignedAt])
   @@index([investigatedAt])
   @@index([closedAt])
-
   @@map("HealthIncidentReport")
 }
 

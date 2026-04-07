@@ -1,0 +1,120 @@
+import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { HouseManagementService } from './house-management.service';
+
+@Controller('house-management')
+export class HouseManagementController {
+  constructor(private readonly houseManagementService: HouseManagementService) {}
+
+  @Get('houses')
+  async getHouses(
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+    @Query('county') county?: string,
+    @Query('risk') risk?: string,
+  ) {
+    return this.houseManagementService.getHouses({
+      search,
+      status,
+      county,
+      risk,
+    });
+  }
+
+  @Get('dashboard/:houseId')
+  async getDashboard(@Param('houseId') houseId: string) {
+    return this.houseManagementService.getDashboard(houseId);
+  }
+
+  @Get('residents/:houseId')
+  async getResidents(@Param('houseId') houseId: string) {
+    return this.houseManagementService.getResidents(houseId);
+  }
+
+  @Get('staffing/:houseId')
+  async getStaffing(@Param('houseId') houseId: string) {
+    return this.houseManagementService.getStaffing(houseId);
+  }
+
+  @Get('available-individuals')
+  async getAvailableIndividuals(
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.houseManagementService.getAvailableIndividuals({
+      search,
+      status,
+    });
+  }
+
+  @Post('houses')
+  async createHouse(
+    @Body()
+    body: {
+      code?: string;
+      name?: string;
+      programType?: string;
+      capacity?: number;
+      primaryOccupancyModel?: string;
+      county?: string;
+      phone?: string;
+      address1?: string;
+      billingNote?: string;
+      careComplexityNote?: string;
+    },
+  ) {
+    return this.houseManagementService.createHouse(body);
+  }
+
+  @Patch('houses/:houseId')
+  async updateHouse(
+    @Param('houseId') houseId: string,
+    @Body()
+    body: {
+      code?: string;
+      name?: string;
+      programType?: string;
+      capacity?: number;
+      primaryOccupancyModel?: string;
+      county?: string;
+      phone?: string;
+      address1?: string;
+      billingNote?: string;
+      careComplexityNote?: string;
+    },
+  ) {
+    return this.houseManagementService.updateHouse(houseId, body);
+  }
+
+  @Patch('residents/:individualId/assign-house')
+  async assignResidentToHouse(
+    @Param('individualId') individualId: string,
+    @Body()
+    body: {
+      houseId?: string;
+    },
+  ) {
+    return this.houseManagementService.assignResidentToHouse(individualId, body);
+  }
+
+  @Patch('residents/:individualId/remove-house')
+  async removeResidentFromHouse(@Param('individualId') individualId: string) {
+    return this.houseManagementService.removeResidentFromHouse(individualId);
+  }
+
+  @Patch('residents/:individualId/residential-profile')
+  async updateResidentialProfile(
+    @Param('individualId') individualId: string,
+    @Body()
+    body: {
+      residentialPlacementType?: string;
+      homeVisitSchedule?: string;
+      housingCoverage?: string;
+      careRateTier?: string;
+      roomLabel?: string;
+      behaviorSupportLevel?: string;
+      appointmentLoad?: string;
+    },
+  ) {
+    return this.houseManagementService.updateResidentialProfile(individualId, body);
+  }
+}

@@ -32,6 +32,9 @@ import { ServiceRatesModule } from './service-rates/service-rates.module';
 // ✅ AWAKE CRON
 import { AwakeModule } from './awake/awake.module';
 
+// ✅ HOUSE MANAGEMENT
+import { HouseManagementModule } from './house-management/house-management.module';
+
 @Module({
   imports: [
     // ✅ Enable Nest cron / scheduler
@@ -69,6 +72,9 @@ import { AwakeModule } from './awake/awake.module';
 
     // ✅ Awake Monitoring cron
     AwakeModule,
+
+    // ✅ HOUSE MANAGEMENT
+    HouseManagementModule,
   ],
   controllers: [
     AppController,
