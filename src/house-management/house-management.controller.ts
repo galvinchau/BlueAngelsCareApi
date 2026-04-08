@@ -1,3 +1,4 @@
+// bac-hms/bac-api/src/house-management/house-management.controller.ts
 import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { HouseManagementService } from './house-management.service';
 
@@ -43,6 +44,19 @@ export class HouseManagementController {
     return this.houseManagementService.getAvailableIndividuals({
       search,
       status,
+    });
+  }
+
+  @Get('available-employees')
+  async getAvailableEmployees(
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+    @Query('houseId') houseId?: string,
+  ) {
+    return this.houseManagementService.getAvailableEmployees({
+      search,
+      status,
+      houseId,
     });
   }
 
@@ -116,5 +130,35 @@ export class HouseManagementController {
     },
   ) {
     return this.houseManagementService.updateResidentialProfile(individualId, body);
+  }
+
+  @Patch('staff/:employeeId/assign-house')
+  async assignStaffToHouse(
+    @Param('employeeId') employeeId: string,
+    @Body()
+    body: {
+      houseId?: string;
+      houseRole?: string;
+      isPrimaryStaff?: boolean;
+    },
+  ) {
+    return this.houseManagementService.assignStaffToHouse(employeeId, body);
+  }
+
+  @Patch('staff/:employeeId/remove-house')
+  async removeStaffFromHouse(@Param('employeeId') employeeId: string) {
+    return this.houseManagementService.removeStaffFromHouse(employeeId);
+  }
+
+  @Patch('staff/:employeeId/house-role')
+  async updateStaffHouseRole(
+    @Param('employeeId') employeeId: string,
+    @Body()
+    body: {
+      houseRole?: string;
+      isPrimaryStaff?: boolean;
+    },
+  ) {
+    return this.houseManagementService.updateStaffHouseRole(employeeId, body);
   }
 }

@@ -37,8 +37,25 @@ type GetAvailableIndividualsFilters = {
   status?: string;
 };
 
+type GetAvailableEmployeesFilters = {
+  search?: string;
+  status?: string;
+  houseId?: string;
+};
+
 type AssignResidentToHouseInput = {
   houseId?: string;
+};
+
+type AssignStaffToHouseInput = {
+  houseId?: string;
+  houseRole?: string;
+  isPrimaryStaff?: boolean;
+};
+
+type UpdateStaffHouseRoleInput = {
+  houseRole?: string;
+  isPrimaryStaff?: boolean;
 };
 
 type UpdateResidentialProfileInput = {
@@ -50,6 +67,12 @@ type UpdateResidentialProfileInput = {
   behaviorSupportLevel?: string;
   appointmentLoad?: string;
 };
+
+type HouseAlertAction =
+  | 'VIEW_RESIDENTS'
+  | 'VIEW_STAFFING'
+  | 'VIEW_COVERAGE'
+  | 'VIEW_DASHBOARD';
 
 @Injectable()
 export class HouseManagementService {
@@ -421,11 +444,12 @@ export class HouseManagementService {
       include: {
         employee: true,
       },
-      orderBy: [{ createdAt: 'asc' }],
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
     });
 
     const todayStart = this.startOfToday();
     const todayEnd = this.endOfToday();
+    const now = new Date();
 
     const todayShiftStaffings = await this.prisma.houseShiftStaffing.findMany({
       where: {
@@ -443,35 +467,80 @@ export class HouseManagementService {
       },
     });
 
+    const todayScheduleShifts = await this.prisma.scheduleShift.findMany({
+      where: {
+        individual: {
+          houseId,
+        },
+        scheduleDate: {
+          gte: todayStart,
+          lte: todayEnd,
+        },
+      },
+      select: {
+        id: true,
+        plannedStart: true,
+        plannedEnd: true,
+        plannedDspId: true,
+        actualDspId: true,
+        status: true,
+      },
+      orderBy: [{ plannedStart: 'asc' }],
+    });
+
+    const multiDspShiftCount = this.countTodayMultiDspShifts(
+      todayScheduleShifts,
+      todayShiftStaffings,
+    );
+
     const staffRows = houseEmployees.map((he) => {
       const employee = he.employee;
-      const assignedToday = todayShiftStaffings.filter(
+
+      const assignedTodayByHouseStaffing = todayShiftStaffings.filter(
         (s) => s.employeeId === employee.id,
       );
 
-      const currentShift = assignedToday[0]?.shift;
+      const assignedTodayBySchedule = todayScheduleShifts.filter(
+        (shift) =>
+          shift.actualDspId === employee.id || shift.plannedDspId === employee.id,
+      );
+
+      const currentShiftFromHouseStaffing = assignedTodayByHouseStaffing[0]?.shift;
+      const currentShiftFromSchedule = assignedTodayBySchedule[0];
+
+      const resolvedShift = currentShiftFromHouseStaffing || currentShiftFromSchedule;
+
+      const isOnDutyNow =
+        assignedTodayByHouseStaffing.some((s) =>
+          this.isNowWithinShiftWindow(s.shift.plannedStart, s.shift.plannedEnd, now),
+        ) ||
+        assignedTodayBySchedule.some((shift) =>
+          this.isNowWithinShiftWindow(shift.plannedStart, shift.plannedEnd, now),
+        );
+
+      const normalizedRole = String(he.roleInHouse || employee.role || '').toUpperCase();
+      const medCertified = normalizedRole.includes('MED');
+      const behaviorSpecialist = normalizedRole.includes('BEHAVIOR');
 
       return {
         id: employee.id,
         name: this.employeeFullName(employee),
         role: he.roleInHouse || employee.role || 'DSP',
-        shiftToday: currentShift
-          ? `${this.toHourMinute(currentShift.plannedStart)} - ${this.toHourMinute(currentShift.plannedEnd)}`
+        isPrimaryStaff: Boolean(he.isPrimary),
+        shiftToday: resolvedShift
+          ? `${this.toHourMinute(resolvedShift.plannedStart)} - ${this.toHourMinute(resolvedShift.plannedEnd)}`
           : '',
         trainingStatus: 'CURRENT',
-        medCertified: true,
+        medCertified,
+        behaviorSpecialist,
         cpr: 'CURRENT',
         driver: 'ACTIVE',
         clearance: 'CURRENT',
-        status: assignedToday.length > 0 ? 'ON_DUTY' : 'OFF_DUTY',
+        status: isOnDutyNow ? 'ON_DUTY' : 'OFF_DUTY',
       };
     });
 
-    const specialistsCount = staffRows.filter((s) =>
-      String(s.role).toUpperCase().includes('BEHAVIOR'),
-    ).length;
-
-    const multiDspShiftCount = await this.countMultiDspShifts(houseId);
+    const specialistsCount = staffRows.filter((s) => s.behaviorSpecialist).length;
 
     return {
       houseId: house.id,
@@ -484,7 +553,19 @@ export class HouseManagementService {
         medCertStaff: staffRows.filter((s) => s.medCertified).length,
         trainingOverdue: staffRows.filter((s) => s.trainingStatus === 'OVERDUE').length,
       },
-      items: staffRows,
+      items: staffRows.map((s) => ({
+        id: s.id,
+        name: s.name,
+        role: s.role,
+        isPrimaryStaff: s.isPrimaryStaff,
+        shiftToday: s.shiftToday,
+        trainingStatus: s.trainingStatus,
+        medCertified: s.medCertified,
+        cpr: s.cpr,
+        driver: s.driver,
+        clearance: s.clearance,
+        status: s.status,
+      })),
     };
   }
 
@@ -533,6 +614,80 @@ export class HouseManagementService {
         maNumber: item.medicaidId || '',
         status: item.status || '',
       })),
+      total: items.length,
+    };
+  }
+
+  async getAvailableEmployees(filters: GetAvailableEmployeesFilters) {
+    const search = (filters.search || '').trim();
+    const houseId = (filters.houseId || '').trim();
+
+    const employees = await this.prisma.employee.findMany({
+      where: {
+        ...(search
+          ? {
+              OR: [
+                { firstName: { contains: search, mode: 'insensitive' } },
+                { middleName: { contains: search, mode: 'insensitive' } },
+                { lastName: { contains: search, mode: 'insensitive' } },
+                { role: { contains: search, mode: 'insensitive' } },
+              ],
+            }
+          : {}),
+      },
+      select: {
+        id: true,
+        firstName: true,
+        middleName: true,
+        lastName: true,
+        role: true,
+      },
+      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+    });
+
+    const employeeIds = employees.map((e) => e.id);
+
+    const activeLinks =
+      employeeIds.length > 0
+        ? await this.prisma.houseEmployee.findMany({
+            where: {
+              employeeId: { in: employeeIds },
+              isActive: true,
+            },
+            select: {
+              employeeId: true,
+              houseId: true,
+              roleInHouse: true,
+              isPrimary: true,
+            },
+          })
+        : [];
+
+    const activeLinkByEmployeeId = new Map(
+      activeLinks.map((link) => [link.employeeId, link]),
+    );
+
+    const items = employees
+      .filter((employee) => {
+        const activeLink = activeLinkByEmployeeId.get(employee.id);
+
+        if (!activeLink) return true;
+
+        if (houseId && activeLink.houseId === houseId) {
+          return false;
+        }
+
+        return false;
+      })
+      .map((employee) => ({
+        id: employee.id,
+        name: this.employeeFullName(employee),
+        role: employee.role || 'DSP',
+        status: 'AVAILABLE',
+      }));
+
+    return {
+      items,
       total: items.length,
     };
   }
@@ -662,6 +817,267 @@ export class HouseManagementService {
       houseId: updated.houseId,
       name: this.individualFullName(updated),
       message: 'Resident removed from house successfully.',
+    };
+  }
+
+  async assignStaffToHouse(employeeId: string, input: AssignStaffToHouseInput) {
+    const houseId = (input.houseId || '').trim();
+    const houseRole = this.normalizeHouseStaffRole(input.houseRole);
+    const isPrimaryStaff = Boolean(input.isPrimaryStaff);
+
+    if (!houseId) {
+      throw new BadRequestException('houseId is required.');
+    }
+
+    if (!houseRole) {
+      throw new BadRequestException('houseRole is required.');
+    }
+
+    const house = await this.prisma.house.findUnique({
+      where: { id: houseId },
+      select: {
+        id: true,
+        name: true,
+      },
+    });
+
+    if (!house) {
+      throw new NotFoundException('House not found.');
+    }
+
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        id: true,
+        firstName: true,
+        middleName: true,
+        lastName: true,
+        role: true,
+      },
+    });
+
+    if (!employee) {
+      throw new NotFoundException('Employee not found.');
+    }
+
+    const activeAssignment = await this.prisma.houseEmployee.findFirst({
+      where: {
+        employeeId,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        houseId: true,
+        roleInHouse: true,
+        isPrimary: true,
+      },
+    });
+
+    if (activeAssignment?.houseId && activeAssignment.houseId !== houseId) {
+      throw new BadRequestException(
+        'Employee is already assigned to another house.',
+      );
+    }
+
+    const existingSameHouseAssignment = await this.prisma.houseEmployee.findFirst({
+      where: {
+        employeeId,
+        houseId,
+      },
+      select: {
+        id: true,
+        houseId: true,
+        roleInHouse: true,
+        isPrimary: true,
+        isActive: true,
+      },
+    });
+
+    await this.prisma.$transaction(async (tx) => {
+      if (isPrimaryStaff) {
+        await tx.houseEmployee.updateMany({
+          where: {
+            houseId,
+            isActive: true,
+          },
+          data: {
+            isPrimary: false,
+          },
+        });
+      }
+
+      if (existingSameHouseAssignment) {
+        await tx.houseEmployee.update({
+          where: { id: existingSameHouseAssignment.id },
+          data: {
+            roleInHouse: houseRole,
+            isPrimary: isPrimaryStaff,
+            isActive: true,
+          },
+        });
+      } else {
+        await tx.houseEmployee.create({
+          data: {
+            houseId,
+            employeeId,
+            roleInHouse: houseRole,
+            isPrimary: isPrimaryStaff,
+            isActive: true,
+          },
+        });
+      }
+    });
+
+    return {
+      id: employee.id,
+      houseId,
+      name: this.employeeFullName(employee),
+      houseRole,
+      isPrimaryStaff,
+      message: existingSameHouseAssignment
+        ? 'Staff assignment reactivated successfully.'
+        : 'Staff assigned to house successfully.',
+    };
+  }
+
+  async removeStaffFromHouse(employeeId: string) {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        id: true,
+        firstName: true,
+        middleName: true,
+        lastName: true,
+      },
+    });
+
+    if (!employee) {
+      throw new NotFoundException('Employee not found.');
+    }
+
+    const activeAssignment = await this.prisma.houseEmployee.findFirst({
+      where: {
+        employeeId,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        houseId: true,
+      },
+    });
+
+    if (!activeAssignment) {
+      return {
+        id: employee.id,
+        houseId: null,
+        name: this.employeeFullName(employee),
+        message: 'Staff is not assigned to any house.',
+      };
+    }
+
+    await this.prisma.houseEmployee.update({
+      where: { id: activeAssignment.id },
+      data: {
+        isActive: false,
+        isPrimary: false,
+      },
+    });
+
+    return {
+      id: employee.id,
+      houseId: null,
+      name: this.employeeFullName(employee),
+      message: 'Staff removed from house successfully.',
+    };
+  }
+
+  async updateStaffHouseRole(
+    employeeId: string,
+    input: UpdateStaffHouseRoleInput,
+  ) {
+    const houseRole = this.normalizeHouseStaffRole(input.houseRole);
+    const isPrimaryStaff =
+      typeof input.isPrimaryStaff === 'boolean' ? input.isPrimaryStaff : undefined;
+
+    if (!houseRole && typeof isPrimaryStaff === 'undefined') {
+      throw new BadRequestException(
+        'At least one of houseRole or isPrimaryStaff is required.',
+      );
+    }
+
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        id: true,
+        firstName: true,
+        middleName: true,
+        lastName: true,
+      },
+    });
+
+    if (!employee) {
+      throw new NotFoundException('Employee not found.');
+    }
+
+    const activeAssignment = await this.prisma.houseEmployee.findFirst({
+      where: {
+        employeeId,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        houseId: true,
+        roleInHouse: true,
+        isPrimary: true,
+      },
+    });
+
+    if (!activeAssignment) {
+      throw new BadRequestException(
+        'Staff must be assigned to a house before updating house role.',
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      if (isPrimaryStaff === true) {
+        await tx.houseEmployee.updateMany({
+          where: {
+            houseId: activeAssignment.houseId,
+            isActive: true,
+          },
+          data: {
+            isPrimary: false,
+          },
+        });
+      }
+
+      await tx.houseEmployee.update({
+        where: { id: activeAssignment.id },
+        data: {
+          ...(houseRole ? { roleInHouse: houseRole } : {}),
+          ...(typeof isPrimaryStaff === 'boolean'
+            ? { isPrimary: isPrimaryStaff }
+            : {}),
+        },
+      });
+    });
+
+    const refreshed = await this.prisma.houseEmployee.findUnique({
+      where: { id: activeAssignment.id },
+      select: {
+        houseId: true,
+        roleInHouse: true,
+        isPrimary: true,
+      },
+    });
+
+    return {
+      id: employee.id,
+      houseId: refreshed?.houseId || activeAssignment.houseId,
+      name: this.employeeFullName(employee),
+      houseRole: refreshed?.roleInHouse || activeAssignment.roleInHouse || 'DSP',
+      isPrimaryStaff: Boolean(refreshed?.isPrimary),
+      message: 'Staff house role updated successfully.',
     };
   }
 
@@ -1014,6 +1430,7 @@ export class HouseManagementService {
       title: string;
       detail: string;
       actionLabel: string;
+      action: HouseAlertAction;
     }> = [];
 
     const intensiveResidents = residents.filter(
@@ -1026,7 +1443,8 @@ export class HouseManagementService {
         level: 'CRITICAL',
         title: 'House is at full capacity',
         detail: `${residentMetrics.residentCount} of ${residentMetrics.capacity} beds are currently occupied.`,
-        actionLabel: 'Open Dashboard',
+        actionLabel: 'View Residents',
+        action: 'VIEW_RESIDENTS',
       });
     } else if (residentMetrics?.occupancyStatus === 'NEAR_FULL') {
       alerts.push({
@@ -1034,7 +1452,8 @@ export class HouseManagementService {
         level: 'WARNING',
         title: 'House is nearing full capacity',
         detail: `${residentMetrics.remainingBeds} bed(s) remaining before this house is full.`,
-        actionLabel: 'Open Dashboard',
+        actionLabel: 'View Residents',
+        action: 'VIEW_RESIDENTS',
       });
     }
 
@@ -1044,7 +1463,8 @@ export class HouseManagementService {
         level: 'CRITICAL',
         title: 'High-need resident support requires close staffing review',
         detail: `${intensiveResidents} resident(s) in this house are marked as intensive behavior support.`,
-        actionLabel: 'Open Staffing',
+        actionLabel: 'Fix Staffing',
+        action: 'VIEW_STAFFING',
       });
     }
 
@@ -1054,7 +1474,8 @@ export class HouseManagementService {
         level: 'WARNING',
         title: 'Some residents are missing room labels',
         detail: `${residentMetrics?.missingRoomCount} resident(s) do not have a room label assigned.`,
-        actionLabel: 'Open Residents',
+        actionLabel: 'View Residents',
+        action: 'VIEW_RESIDENTS',
       });
     }
 
@@ -1064,7 +1485,8 @@ export class HouseManagementService {
         level: 'WARNING',
         title: 'Some residents are missing care rate tier',
         detail: `${residentMetrics?.missingCareRateTierCount} resident(s) do not have Care Rate Tier completed.`,
-        actionLabel: 'Open Residents',
+        actionLabel: 'View Residents',
+        action: 'VIEW_RESIDENTS',
       });
     }
 
@@ -1074,7 +1496,8 @@ export class HouseManagementService {
         level: 'WARNING',
         title: 'Some residents are missing housing coverage',
         detail: `${residentMetrics?.missingHousingCoverageCount} resident(s) do not have Housing Coverage completed.`,
-        actionLabel: 'Open Residents',
+        actionLabel: 'View Residents',
+        action: 'VIEW_RESIDENTS',
       });
     }
 
@@ -1084,7 +1507,8 @@ export class HouseManagementService {
         level: 'WARNING',
         title: 'Some split-placement residents are missing home visit schedule',
         detail: `${residentMetrics?.missingHomeVisitScheduleCount} HOME_VISIT_SPLIT resident(s) do not have Home Visit Schedule completed.`,
-        actionLabel: 'Open Residents',
+        actionLabel: 'View Residents',
+        action: 'VIEW_RESIDENTS',
       });
     }
 
@@ -1098,7 +1522,8 @@ export class HouseManagementService {
         level: 'WARNING',
         title: 'Some shifts do not have house staffing assignments',
         detail: `${underCoveredShifts} shift(s) need HouseShiftStaffing records.`,
-        actionLabel: 'Open Dashboard',
+        actionLabel: 'Fix Staffing',
+        action: 'VIEW_STAFFING',
       });
     }
 
@@ -1110,7 +1535,8 @@ export class HouseManagementService {
         level: 'INFO',
         title: 'Awake monitoring shift detected',
         detail: `${awakeShifts} shift(s) today require awake monitoring.`,
-        actionLabel: 'Open Dashboard',
+        actionLabel: 'View Coverage',
+        action: 'VIEW_COVERAGE',
       });
     }
 
@@ -1121,6 +1547,7 @@ export class HouseManagementService {
         title: 'No major operational alerts',
         detail: 'House is currently stable based on the available data.',
         actionLabel: 'View Dashboard',
+        action: 'VIEW_DASHBOARD',
       });
     }
 
@@ -1211,16 +1638,58 @@ export class HouseManagementService {
     }));
   }
 
-  private async countMultiDspShifts(houseId: string): Promise<number> {
-    const rows = await this.prisma.houseShiftStaffing.groupBy({
-      by: ['shiftId'],
-      where: { houseId },
-      _count: {
-        shiftId: true,
-      },
-    });
+  private countTodayMultiDspShifts(
+    todayScheduleShifts: Array<{
+      id: string;
+      plannedDspId: string | null;
+      actualDspId: string | null;
+    }>,
+    todayShiftStaffings: Array<{
+      shiftId: string;
+      employeeId: string;
+    }>,
+  ): number {
+    const shiftToEmployees = new Map<string, Set<string>>();
 
-    return rows.filter((r) => (r._count.shiftId || 0) >= 2).length;
+    for (const shift of todayScheduleShifts) {
+      const employeeSet = shiftToEmployees.get(shift.id) || new Set<string>();
+
+      if (shift.plannedDspId) employeeSet.add(shift.plannedDspId);
+      if (shift.actualDspId) employeeSet.add(shift.actualDspId);
+
+      shiftToEmployees.set(shift.id, employeeSet);
+    }
+
+    for (const staffing of todayShiftStaffings) {
+      const employeeSet =
+        shiftToEmployees.get(staffing.shiftId) || new Set<string>();
+      employeeSet.add(staffing.employeeId);
+      shiftToEmployees.set(staffing.shiftId, employeeSet);
+    }
+
+    return Array.from(shiftToEmployees.values()).filter(
+      (employeeSet) => employeeSet.size >= 2,
+    ).length;
+  }
+
+  private isNowWithinShiftWindow(
+    start: Date,
+    end: Date,
+    now: Date,
+  ): boolean {
+    const nowMs = now.getTime();
+    const startMs = start.getTime();
+    const endMs = end.getTime();
+
+    if (endMs >= startMs) {
+      return nowMs >= startMs && nowMs <= endMs;
+    }
+
+    const adjustedEnd = endMs + 24 * 60 * 60 * 1000;
+    const adjustedNow =
+      nowMs < startMs ? nowMs + 24 * 60 * 60 * 1000 : nowMs;
+
+    return adjustedNow >= startMs && adjustedNow <= adjustedEnd;
   }
 
   private getOccupancyStatus(
@@ -1347,6 +1816,27 @@ export class HouseManagementService {
     if (!allowedValues.includes(normalized)) {
       throw new BadRequestException(
         `${fieldName} must be one of: ${allowedValues.join(', ')}.`,
+      );
+    }
+
+    return normalized;
+  }
+
+  private normalizeHouseStaffRole(value?: string | null): string | null {
+    const normalized = (value || '').trim().toUpperCase();
+
+    if (!normalized) return null;
+
+    const allowedValues = [
+      'DSP',
+      'SUPERVISOR',
+      'BEHAVIOR SPECIALIST',
+      'MED CERTIFIED',
+    ];
+
+    if (!allowedValues.includes(normalized)) {
+      throw new BadRequestException(
+        `houseRole must be one of: ${allowedValues.join(', ')}.`,
       );
     }
 
