@@ -68,6 +68,47 @@ type UpdateResidentialProfileInput = {
   appointmentLoad?: string;
 };
 
+type CreateFireDrillInput = {
+  houseId?: string;
+  drillDate?: string;
+  drillTimeLabel?: string;
+  isSleepingDrill?: boolean;
+  isUnannounced?: boolean;
+  isUnderNormalStaffing?: boolean;
+  evacuationTimeMinutes?: number;
+  allIndividualsEvacuated?: boolean;
+  alarmType?: string;
+  alarmOperative?: boolean;
+  exitRouteUsed?: string;
+  alternateExitUsed?: boolean;
+  meetingPlace?: string;
+  problemsEncountered?: string;
+  correctiveAction?: string;
+  conductedBy?: string;
+  staffPresent?: string;
+  notes?: string;
+};
+
+type UpdateFireDrillInput = {
+  drillDate?: string;
+  drillTimeLabel?: string;
+  isSleepingDrill?: boolean;
+  isUnannounced?: boolean;
+  isUnderNormalStaffing?: boolean;
+  evacuationTimeMinutes?: number;
+  allIndividualsEvacuated?: boolean;
+  alarmType?: string;
+  alarmOperative?: boolean;
+  exitRouteUsed?: string;
+  alternateExitUsed?: boolean;
+  meetingPlace?: string;
+  problemsEncountered?: string;
+  correctiveAction?: string;
+  conductedBy?: string;
+  staffPresent?: string;
+  notes?: string;
+};
+
 type HouseAlertAction =
   | 'VIEW_RESIDENTS'
   | 'VIEW_STAFFING'
@@ -148,6 +189,180 @@ export class HouseManagementService {
     return {
       items: filtered,
       total: filtered.length,
+    };
+  }
+
+  async createFireDrill(input: CreateFireDrillInput) {
+    const houseId = (input.houseId || '').trim();
+
+    if (!houseId) {
+      throw new BadRequestException('houseId is required.');
+    }
+
+    if (!input.drillDate) {
+      throw new BadRequestException('drillDate is required.');
+    }
+
+    const drillDate = new Date(input.drillDate);
+    if (Number.isNaN(drillDate.getTime())) {
+      throw new BadRequestException('drillDate is invalid.');
+    }
+
+    const house = await this.prisma.house.findUnique({
+      where: { id: houseId },
+      select: { id: true, name: true },
+    });
+
+    if (!house) {
+      throw new NotFoundException('House not found.');
+    }
+
+    const created = await this.prisma.houseFireDrill.create({
+      data: {
+        houseId,
+        drillDate,
+        drillTimeLabel: this.normalizeOptionalString(input.drillTimeLabel),
+        isSleepingDrill: Boolean(input.isSleepingDrill),
+        isUnannounced: Boolean(input.isUnannounced),
+        isUnderNormalStaffing:
+          typeof input.isUnderNormalStaffing === 'boolean'
+            ? input.isUnderNormalStaffing
+            : true,
+        evacuationTimeMinutes:
+          typeof input.evacuationTimeMinutes === 'number'
+            ? input.evacuationTimeMinutes
+            : null,
+        allIndividualsEvacuated:
+          typeof input.allIndividualsEvacuated === 'boolean'
+            ? input.allIndividualsEvacuated
+            : true,
+        alarmType: this.normalizeOptionalString(input.alarmType),
+        alarmOperative:
+          typeof input.alarmOperative === 'boolean' ? input.alarmOperative : null,
+        exitRouteUsed: this.normalizeOptionalString(input.exitRouteUsed),
+        alternateExitUsed: Boolean(input.alternateExitUsed),
+        meetingPlace: this.normalizeOptionalString(input.meetingPlace),
+        problemsEncountered: this.normalizeOptionalString(input.problemsEncountered),
+        correctiveAction: this.normalizeOptionalString(input.correctiveAction),
+        conductedBy: this.normalizeOptionalString(input.conductedBy),
+        staffPresent: this.normalizeOptionalString(input.staffPresent),
+        notes: this.normalizeOptionalString(input.notes),
+      },
+      select: {
+        id: true,
+        houseId: true,
+      },
+    });
+
+    return {
+      id: created.id,
+      houseId: created.houseId,
+      message: 'Fire drill created successfully.',
+    };
+  }
+
+  async updateFireDrill(fireDrillId: string, input: UpdateFireDrillInput) {
+    const existing = await this.prisma.houseFireDrill.findUnique({
+      where: { id: fireDrillId },
+      select: { id: true, houseId: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException('Fire drill not found.');
+    }
+
+    const data: Record<string, unknown> = {};
+
+    if (typeof input.drillDate !== 'undefined') {
+      const parsed = new Date(input.drillDate);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new BadRequestException('drillDate is invalid.');
+      }
+      data.drillDate = parsed;
+    }
+
+    if (typeof input.drillTimeLabel !== 'undefined') {
+      data.drillTimeLabel = this.normalizeOptionalString(input.drillTimeLabel);
+    }
+
+    if (typeof input.isSleepingDrill === 'boolean') {
+      data.isSleepingDrill = input.isSleepingDrill;
+    }
+
+    if (typeof input.isUnannounced === 'boolean') {
+      data.isUnannounced = input.isUnannounced;
+    }
+
+    if (typeof input.isUnderNormalStaffing === 'boolean') {
+      data.isUnderNormalStaffing = input.isUnderNormalStaffing;
+    }
+
+    if (typeof input.evacuationTimeMinutes !== 'undefined') {
+      data.evacuationTimeMinutes =
+        typeof input.evacuationTimeMinutes === 'number'
+          ? input.evacuationTimeMinutes
+          : null;
+    }
+
+    if (typeof input.allIndividualsEvacuated === 'boolean') {
+      data.allIndividualsEvacuated = input.allIndividualsEvacuated;
+    }
+
+    if (typeof input.alarmType !== 'undefined') {
+      data.alarmType = this.normalizeOptionalString(input.alarmType);
+    }
+
+    if (typeof input.alarmOperative === 'boolean') {
+      data.alarmOperative = input.alarmOperative;
+    }
+
+    if (typeof input.exitRouteUsed !== 'undefined') {
+      data.exitRouteUsed = this.normalizeOptionalString(input.exitRouteUsed);
+    }
+
+    if (typeof input.alternateExitUsed === 'boolean') {
+      data.alternateExitUsed = input.alternateExitUsed;
+    }
+
+    if (typeof input.meetingPlace !== 'undefined') {
+      data.meetingPlace = this.normalizeOptionalString(input.meetingPlace);
+    }
+
+    if (typeof input.problemsEncountered !== 'undefined') {
+      data.problemsEncountered = this.normalizeOptionalString(
+        input.problemsEncountered,
+      );
+    }
+
+    if (typeof input.correctiveAction !== 'undefined') {
+      data.correctiveAction = this.normalizeOptionalString(input.correctiveAction);
+    }
+
+    if (typeof input.conductedBy !== 'undefined') {
+      data.conductedBy = this.normalizeOptionalString(input.conductedBy);
+    }
+
+    if (typeof input.staffPresent !== 'undefined') {
+      data.staffPresent = this.normalizeOptionalString(input.staffPresent);
+    }
+
+    if (typeof input.notes !== 'undefined') {
+      data.notes = this.normalizeOptionalString(input.notes);
+    }
+
+    const updated = await this.prisma.houseFireDrill.update({
+      where: { id: fireDrillId },
+      data,
+      select: {
+        id: true,
+        houseId: true,
+      },
+    });
+
+    return {
+      id: updated.id,
+      houseId: updated.houseId,
+      message: 'Fire drill updated successfully.',
     };
   }
 
@@ -566,6 +781,206 @@ export class HouseManagementService {
         clearance: s.clearance,
         status: s.status,
       })),
+    };
+  }
+
+  async getCompliance(houseId: string) {
+    const house = await this.prisma.house.findUnique({
+      where: { id: houseId },
+      select: {
+        id: true,
+        name: true,
+        code: true,
+        address1: true,
+        address2: true,
+        city: true,
+        state: true,
+        zip: true,
+        county: true,
+        phone: true,
+        programType: true,
+        capacity: true,
+      },
+    });
+
+    if (!house) {
+      throw new NotFoundException('House not found');
+    }
+
+    const [complianceRows, fireDrillRows, incidentRows] = await Promise.all([
+      this.prisma.houseComplianceItem.findMany({
+        where: { houseId },
+        orderBy: [{ category: 'asc' }, { label: 'asc' }],
+      }),
+      this.prisma.houseFireDrill.findMany({
+        where: { houseId },
+        orderBy: [{ drillDate: 'desc' }, { createdAt: 'desc' }],
+      }),
+      this.prisma.houseComplianceIncident.findMany({
+        where: { houseId, resolved: false },
+        orderBy: [{ status: 'desc' }, { createdAt: 'desc' }],
+      }),
+    ]);
+
+    const items = complianceRows.map((row) => ({
+      key: row.category || row.id,
+      label: row.label,
+      score: row.score,
+      status: row.status as 'GOOD' | 'WARNING' | 'CRITICAL',
+      lastReviewed: row.lastReviewed
+        ? this.toYmd(row.lastReviewed)
+        : this.toYmd(row.updatedAt),
+    }));
+
+    const drills = fireDrillRows.map((row) => ({
+      id: row.id,
+      date: this.toYmd(row.drillDate),
+      drillTimeLabel: row.drillTimeLabel || '',
+      isSleepingDrill: Boolean(row.isSleepingDrill),
+      isUnannounced: Boolean(row.isUnannounced),
+      isUnderNormalStaffing: Boolean(row.isUnderNormalStaffing),
+      evacuationTimeMinutes: row.evacuationTimeMinutes ?? null,
+      allIndividualsEvacuated: Boolean(row.allIndividualsEvacuated),
+      alarmType: row.alarmType || '',
+      alarmOperative:
+        typeof row.alarmOperative === 'boolean' ? row.alarmOperative : null,
+      exitRouteUsed: row.exitRouteUsed || '',
+      alternateExitUsed: Boolean(row.alternateExitUsed),
+      meetingPlace: row.meetingPlace || '',
+      problemsEncountered: row.problemsEncountered || '',
+      correctiveAction: row.correctiveAction || '',
+      conductedBy: row.conductedBy || '',
+      staffPresent: row.staffPresent || '',
+      notes: row.notes || '',
+    }));
+
+    let incidents = incidentRows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      detail: row.detail,
+      status: row.status as 'GOOD' | 'WARNING' | 'CRITICAL',
+      actionLabel: row.actionLabel || undefined,
+      action: row.action || undefined,
+    }));
+
+    if (incidents.length === 0) {
+      const residents = await this.prisma.individual.findMany({
+        where: { houseId },
+        select: {
+          id: true,
+          roomLabel: true,
+          careRateTier: true,
+          housingCoverage: true,
+          homeVisitSchedule: true,
+          residentialPlacementType: true,
+          behaviorSupportLevel: true,
+        },
+      });
+
+      const todayStart = this.startOfToday();
+      const todayEnd = this.endOfToday();
+
+      const shifts = await this.prisma.scheduleShift.findMany({
+        where: {
+          individual: { houseId },
+          scheduleDate: {
+            gte: todayStart,
+            lte: todayEnd,
+          },
+        },
+        include: {
+          houseShiftStaffings: {
+            select: { id: true },
+          },
+        },
+      });
+
+      const capacity = typeof house.capacity === 'number' ? house.capacity : 0;
+      const residentCount = residents.length;
+      const remainingBeds = Math.max(capacity - residentCount, 0);
+      const occupancyStatus = this.getOccupancyStatus(residentCount, capacity);
+
+      const missingRoomCount = residents.filter(
+        (r) => !this.normalizeOptionalString(r.roomLabel),
+      ).length;
+      const missingCareRateTierCount = residents.filter(
+        (r) => !this.normalizeOptionalString(r.careRateTier),
+      ).length;
+      const missingHousingCoverageCount = residents.filter(
+        (r) => !this.normalizeOptionalString(r.housingCoverage),
+      ).length;
+      const missingHomeVisitScheduleCount = residents.filter(
+        (r) =>
+          r.residentialPlacementType === 'HOME_VISIT_SPLIT' &&
+          !this.normalizeOptionalString(r.homeVisitSchedule),
+      ).length;
+
+      const alerts = await this.buildHouseAlerts(houseId, residents, shifts, {
+        capacity,
+        residentCount,
+        remainingBeds,
+        occupancyStatus,
+        missingRoomCount,
+        missingCareRateTierCount,
+        missingHousingCoverageCount,
+        missingHomeVisitScheduleCount,
+      });
+
+      incidents = alerts.map((alert) => ({
+        id: alert.id,
+        title: alert.title,
+        detail: alert.detail,
+        status:
+          alert.level === 'CRITICAL'
+            ? 'CRITICAL'
+            : alert.level === 'WARNING'
+              ? 'WARNING'
+              : 'GOOD',
+        actionLabel: alert.actionLabel,
+        action: alert.action,
+      }));
+    }
+
+    const warningItems = items.filter((i) => i.status === 'WARNING').length;
+    const criticalItems = items.filter((i) => i.status === 'CRITICAL').length;
+    const goodItems = items.filter((i) => i.status === 'GOOD').length;
+
+    const overallComplianceScore =
+      items.length > 0
+        ? Math.round(
+            (goodItems * 100 + warningItems * 75 + criticalItems * 40) /
+              items.length,
+          )
+        : 0;
+
+    const fireDrillSummary = this.buildFireDrillSummary(fireDrillRows);
+    const availableAuditYears = this.buildAvailableAuditYears(fireDrillRows);
+    const monthlyDrillMatrix = this.buildMonthlyDrillMatrix(fireDrillRows);
+
+    return {
+      houseId: house.id,
+      houseName: house.name,
+      house: {
+        id: house.id,
+        code: house.code,
+        name: house.name,
+        address: this.formatHouseAddress(house),
+        county: house.county || '',
+        phone: house.phone || '',
+        programType: house.programType || 'Residential 6400',
+      },
+      summary: {
+        overallComplianceScore,
+        warningItems,
+        criticalItems,
+        lastReviewDate: this.todayAsYmd(),
+      },
+      fireDrillSummary,
+      availableAuditYears,
+      monthlyDrillMatrix,
+      items,
+      drills,
+      incidents,
     };
   }
 
@@ -1328,6 +1743,22 @@ export class HouseManagementService {
   }
 
   private async computeComplianceScore(houseId: string): Promise<number> {
+    const realItems = await this.prisma.houseComplianceItem.findMany({
+      where: { houseId },
+      select: { status: true },
+    });
+
+    if (realItems.length > 0) {
+      const goodItems = realItems.filter((i) => i.status === 'GOOD').length;
+      const warningItems = realItems.filter((i) => i.status === 'WARNING').length;
+      const criticalItems = realItems.filter((i) => i.status === 'CRITICAL').length;
+
+      return Math.round(
+        (goodItems * 100 + warningItems * 75 + criticalItems * 40) /
+          realItems.length,
+      );
+    }
+
     const residentCount = await this.prisma.individual.count({
       where: { houseId },
     });
@@ -1344,6 +1775,12 @@ export class HouseManagementService {
   }
 
   private async computeOpenAlerts(houseId: string): Promise<number> {
+    const incidentCount = await this.prisma.houseComplianceIncident.count({
+      where: { houseId, resolved: false },
+    });
+
+    if (incidentCount > 0) return incidentCount;
+
     const residents = await this.prisma.individual.findMany({
       where: { houseId },
       select: {
@@ -1375,7 +1812,6 @@ export class HouseManagementService {
     }).length;
 
     const combined = highNeedCount + profileGapCount;
-
     return combined > 0 ? combined : 1;
   }
 
@@ -1555,6 +1991,23 @@ export class HouseManagementService {
   }
 
   private async buildComplianceBreakdown(houseId: string) {
+    const realItems = await this.prisma.houseComplianceItem.findMany({
+      where: { houseId },
+      orderBy: [{ category: 'asc' }, { label: 'asc' }],
+    });
+
+    if (realItems.length > 0) {
+      return realItems.map((row) => ({
+        key: row.category || row.id,
+        label: row.label,
+        score: row.score,
+        status: row.status as 'GOOD' | 'WARNING' | 'CRITICAL',
+        lastReviewed: row.lastReviewed
+          ? this.toYmd(row.lastReviewed)
+          : this.toYmd(row.updatedAt),
+      }));
+    }
+
     const score = await this.computeComplianceScore(houseId);
 
     return [
@@ -1721,7 +2174,12 @@ export class HouseManagementService {
     state?: string | null;
     zip?: string | null;
   }) {
-    return [house.address1, house.address2, [house.city, house.state].filter(Boolean).join(', '), house.zip]
+    return [
+      house.address1,
+      house.address2,
+      [house.city, house.state].filter(Boolean).join(', '),
+      house.zip,
+    ]
       .filter(Boolean)
       .join(' ');
   }
@@ -1879,10 +2337,138 @@ export class HouseManagementService {
     );
   }
 
+  private buildFireDrillSummary(
+    fireDrillRows: Array<{
+      drillDate: Date;
+      isSleepingDrill: boolean;
+    }>,
+  ) {
+    const sorted = [...fireDrillRows].sort(
+      (a, b) => b.drillDate.getTime() - a.drillDate.getTime(),
+    );
+
+    const lastDrill = sorted[0] || null;
+    const lastSleepingDrill =
+      sorted.find((row) => row.isSleepingDrill) || null;
+
+    const now = new Date();
+
+    const monthlyCompliant =
+      !!lastDrill &&
+      lastDrill.drillDate.getFullYear() === now.getFullYear() &&
+      lastDrill.drillDate.getMonth() === now.getMonth();
+
+    const sleepingDrillOverdue = lastSleepingDrill
+      ? this.monthDiff(lastSleepingDrill.drillDate, now) >= 6
+      : true;
+
+    return {
+      monthlyCompliant,
+      sleepingDrillOverdue,
+      lastDrillDate: lastDrill ? this.toYmd(lastDrill.drillDate) : '',
+      lastSleepingDrillDate: lastSleepingDrill
+        ? this.toYmd(lastSleepingDrill.drillDate)
+        : '',
+    };
+  }
+
+  private buildAvailableAuditYears(
+    fireDrillRows: Array<{
+      drillDate: Date;
+    }>,
+  ): number[] {
+    const baseYear = 2026;
+    const currentYear = new Date().getFullYear();
+    const maxDataYear =
+      fireDrillRows.length > 0
+        ? Math.max(...fireDrillRows.map((row) => row.drillDate.getFullYear()))
+        : currentYear;
+
+    const lastYear = Math.max(maxDataYear, baseYear);
+    const years: number[] = [];
+
+    for (let year = lastYear; year >= baseYear; year -= 1) {
+      years.push(year);
+    }
+
+    return years;
+  }
+
+  private buildMonthlyDrillMatrix(
+    fireDrillRows: Array<{
+      drillDate: Date;
+      isSleepingDrill: boolean;
+    }>,
+  ) {
+    const currentYear = new Date().getFullYear();
+    const latestDrillDate =
+      fireDrillRows.length > 0
+        ? [...fireDrillRows].sort(
+            (a, b) => b.drillDate.getTime() - a.drillDate.getTime(),
+          )[0].drillDate
+        : new Date();
+
+    const targetYear = Math.max(latestDrillDate.getFullYear(), 2026, currentYear);
+
+    const rows: Array<{
+      year: number;
+      month: number;
+      label: string;
+      hasDrill: boolean;
+      hasSleepingDrill: boolean;
+      status: 'OK' | 'MISSING' | 'SLEEPING_DONE';
+    }> = [];
+
+    for (let month = 0; month < 12; month += 1) {
+      const monthlyRows = fireDrillRows.filter(
+        (row) =>
+          row.drillDate.getFullYear() === targetYear &&
+          row.drillDate.getMonth() === month,
+      );
+
+      const hasDrill = monthlyRows.length > 0;
+      const hasSleepingDrill = monthlyRows.some((row) => row.isSleepingDrill);
+
+      const d = new Date(targetYear, month, 1);
+
+      rows.push({
+        year: targetYear,
+        month: month + 1,
+        label: d.toLocaleString('en-US', {
+          month: 'short',
+          year: 'numeric',
+        }),
+        hasDrill,
+        hasSleepingDrill,
+        status: hasSleepingDrill
+          ? 'SLEEPING_DONE'
+          : hasDrill
+            ? 'OK'
+            : 'MISSING',
+      });
+    }
+
+    return rows;
+  }
+
+  private monthDiff(from: Date, to: Date): number {
+    return (
+      (to.getFullYear() - from.getFullYear()) * 12 +
+      (to.getMonth() - from.getMonth())
+    );
+  }
+
   private toHourMinute(date: Date): string {
     const hh = String(date.getHours()).padStart(2, '0');
     const mm = String(date.getMinutes()).padStart(2, '0');
     return `${hh}:${mm}`;
+  }
+
+  private toYmd(date: Date): string {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
   }
 
   private startOfToday(): Date {

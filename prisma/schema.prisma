@@ -42,6 +42,29 @@ enum ClaimStatus {
   VOID
 }
 
+// ✅ NEW: House compliance status
+enum ComplianceStatus {
+  GOOD
+  WARNING
+  CRITICAL
+}
+
+// ✅ NEW: Fire drill result
+enum FireDrillResult {
+  PASS
+  FAIL
+  PARTIAL
+  NA
+}
+
+// ✅ NEW: Fire drill type
+enum FireDrillType {
+  DAY
+  NIGHT
+  FULL
+  EVAC
+}
+
 model Individual {
   id   String @id @default(cuid())
   code String @unique
@@ -303,6 +326,11 @@ model House {
   staffLinks     HouseEmployee[]
   shiftStaffings HouseShiftStaffing[]
 
+  // ✅ NEW: compliance / drills / incidents
+  complianceItems HouseComplianceItem[]
+  fireDrills      HouseFireDrill[]
+  incidents       HouseComplianceIncident[]
+
   @@index([status])
   @@index([county])
 }
@@ -351,6 +379,92 @@ model HouseShiftStaffing {
   @@index([shiftId])
   @@index([houseId])
   @@index([employeeId])
+}
+
+// =====================================================
+//  HOUSE COMPLIANCE
+// =====================================================
+
+model HouseComplianceItem {
+  id String @id @default(cuid())
+
+  houseId String
+  house   House @relation(fields: [houseId], references: [id], onDelete: Cascade)
+
+  category String
+  label    String
+
+  score  Int
+  status ComplianceStatus @default(GOOD)
+
+  lastReviewed DateTime?
+  notes        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([houseId])
+  @@index([houseId, category])
+  @@index([houseId, status])
+}
+
+model HouseFireDrill {
+  id String @id @default(cuid())
+
+  houseId String
+  house House @relation(fields: [houseId], references: [id], onDelete: Cascade)
+
+  drillDate DateTime
+  drillTimeLabel String?
+
+  isSleepingDrill Boolean @default(false)
+  isUnannounced Boolean @default(false)
+  isUnderNormalStaffing Boolean @default(true)
+
+  evacuationTimeMinutes Int?
+  allIndividualsEvacuated Boolean @default(true)
+
+  alarmType String?
+  alarmOperative Boolean?
+
+  exitRouteUsed String?
+  alternateExitUsed Boolean @default(false)
+  meetingPlace String?
+
+  problemsEncountered String?
+  correctiveAction String?
+
+  conductedBy String?
+  staffPresent String?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([houseId, drillDate])
+}
+
+model HouseComplianceIncident {
+  id String @id @default(cuid())
+
+  houseId String
+  house   House @relation(fields: [houseId], references: [id], onDelete: Cascade)
+
+  title  String
+  detail String
+
+  status      ComplianceStatus @default(WARNING)
+  actionLabel String?
+  action      String?
+  resolved    Boolean          @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([houseId])
+  @@index([houseId, status])
+  @@index([houseId, resolved])
 }
 
 /**

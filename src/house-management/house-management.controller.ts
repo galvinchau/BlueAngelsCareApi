@@ -36,6 +36,11 @@ export class HouseManagementController {
     return this.houseManagementService.getStaffing(houseId);
   }
 
+  @Get('compliance/:houseId')
+  async getCompliance(@Param('houseId') houseId: string) {
+    return this.houseManagementService.getCompliance(houseId);
+  }
+
   @Get('available-individuals')
   async getAvailableIndividuals(
     @Query('search') search?: string,
@@ -160,5 +165,41 @@ export class HouseManagementController {
     },
   ) {
     return this.houseManagementService.updateStaffHouseRole(employeeId, body);
+  }
+
+  @Post('fire-drills')
+  async createFireDrill(
+    @Body()
+    body: {
+      houseId?: string;
+      drillDate?: string;
+      drillType?: string;
+      shiftTime?: string;
+      result?: string;
+      conductedBy?: string;
+      source?: string;
+      location?: string;
+      notes?: string;
+    },
+  ) {
+    return this.houseManagementService.createFireDrill(body);
+  }
+
+  @Patch('fire-drills/:fireDrillId')
+  async updateFireDrill(
+    @Param('fireDrillId') fireDrillId: string,
+    @Body()
+    body: {
+      drillDate?: string;
+      drillType?: string;
+      shiftTime?: string;
+      result?: string;
+      conductedBy?: string;
+      source?: string;
+      location?: string;
+      notes?: string;
+    },
+  ) {
+    return this.houseManagementService.updateFireDrill(fireDrillId, body);
   }
 }
