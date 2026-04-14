@@ -117,7 +117,7 @@ type HouseAlertAction =
 
 @Injectable()
 export class HouseManagementService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   async getHouses(filters: GetHousesFilters) {
     const search = (filters.search || '').trim();
@@ -131,14 +131,14 @@ export class HouseManagementService {
         ...(county && county !== 'ALL' ? { county } : {}),
         ...(search
           ? {
-              OR: [
-                { name: { contains: search, mode: 'insensitive' } },
-                { code: { contains: search, mode: 'insensitive' } },
-                { address1: { contains: search, mode: 'insensitive' } },
-                { city: { contains: search, mode: 'insensitive' } },
-                { county: { contains: search, mode: 'insensitive' } },
-              ],
-            }
+            OR: [
+              { name: { contains: search, mode: 'insensitive' } },
+              { code: { contains: search, mode: 'insensitive' } },
+              { address1: { contains: search, mode: 'insensitive' } },
+              { city: { contains: search, mode: 'insensitive' } },
+              { county: { contains: search, mode: 'insensitive' } },
+            ],
+          }
           : {}),
       },
       include: {
@@ -505,9 +505,9 @@ export class HouseManagementService {
       const staffAssigned =
         shift.houseShiftStaffings.length > 0
           ? shift.houseShiftStaffings.map((hs) => ({
-              name: this.employeeFullName(hs.employee),
-              role: hs.roleInShift || hs.employee.role || 'DSP',
-            }))
+            name: this.employeeFullName(hs.employee),
+            role: hs.roleInShift || hs.employee.role || 'DSP',
+          }))
           : this.fallbackShiftStaff(shift);
 
       return {
@@ -948,9 +948,9 @@ export class HouseManagementService {
     const overallComplianceScore =
       items.length > 0
         ? Math.round(
-            (goodItems * 100 + warningItems * 75 + criticalItems * 40) /
-              items.length,
-          )
+          (goodItems * 100 + warningItems * 75 + criticalItems * 40) /
+          items.length,
+        )
         : 0;
 
     const fireDrillSummary = this.buildFireDrillSummary(fireDrillRows);
@@ -1041,13 +1041,13 @@ export class HouseManagementService {
       where: {
         ...(search
           ? {
-              OR: [
-                { firstName: { contains: search, mode: 'insensitive' } },
-                { middleName: { contains: search, mode: 'insensitive' } },
-                { lastName: { contains: search, mode: 'insensitive' } },
-                { role: { contains: search, mode: 'insensitive' } },
-              ],
-            }
+            OR: [
+              { firstName: { contains: search, mode: 'insensitive' } },
+              { middleName: { contains: search, mode: 'insensitive' } },
+              { lastName: { contains: search, mode: 'insensitive' } },
+              { role: { contains: search, mode: 'insensitive' } },
+            ],
+          }
           : {}),
       },
       select: {
@@ -1065,17 +1065,17 @@ export class HouseManagementService {
     const activeLinks =
       employeeIds.length > 0
         ? await this.prisma.houseEmployee.findMany({
-            where: {
-              employeeId: { in: employeeIds },
-              isActive: true,
-            },
-            select: {
-              employeeId: true,
-              houseId: true,
-              roleInHouse: true,
-              isPrimary: true,
-            },
-          })
+          where: {
+            employeeId: { in: employeeIds },
+            isActive: true,
+          },
+          select: {
+            employeeId: true,
+            houseId: true,
+            roleInHouse: true,
+            isPrimary: true,
+          },
+        })
         : [];
 
     const activeLinkByEmployeeId = new Map(
@@ -1755,7 +1755,7 @@ export class HouseManagementService {
 
       return Math.round(
         (goodItems * 100 + warningItems * 75 + criticalItems * 40) /
-          realItems.length,
+        realItems.length,
       );
     }
 
@@ -2404,8 +2404,8 @@ export class HouseManagementService {
     const latestDrillDate =
       fireDrillRows.length > 0
         ? [...fireDrillRows].sort(
-            (a, b) => b.drillDate.getTime() - a.drillDate.getTime(),
-          )[0].drillDate
+          (a, b) => b.drillDate.getTime() - a.drillDate.getTime(),
+        )[0].drillDate
         : new Date();
 
     const targetYear = Math.max(latestDrillDate.getFullYear(), 2026, currentYear);
@@ -2449,6 +2449,236 @@ export class HouseManagementService {
     }
 
     return rows;
+  }
+
+  async getOperations(houseId: string) {
+    const house = await this.prisma.house.findUnique({
+      where: { id: houseId },
+      select: { id: true, name: true },
+    });
+
+    if (!house) {
+      throw new NotFoundException('House not found');
+    }
+
+    const todayStart = this.startOfToday();
+    const todayEnd = this.endOfToday();
+    const now = new Date();
+
+    // =========================
+    // Residents
+    // =========================
+    const residents = await this.prisma.individual.findMany({
+      where: { houseId },
+      select: {
+        id: true,
+        firstName: true,
+        middleName: true,
+        lastName: true,
+        behaviorSupportLevel: true,
+      },
+    });
+
+    // =========================
+    // Shifts today
+    // =========================
+    const shifts = await this.prisma.scheduleShift.findMany({
+      where: {
+        individual: { houseId },
+        scheduleDate: {
+          gte: todayStart,
+          lte: todayEnd,
+        },
+      },
+      include: {
+        service: true,
+        individual: true,
+        houseShiftStaffings: {
+          include: {
+            employee: true,
+          },
+        },
+        plannedDsp: true,
+        actualDsp: true,
+      },
+      orderBy: [{ plannedStart: 'asc' }],
+    });
+
+    // =========================
+    // Staff (for on-duty calc)
+    // =========================
+    const todayShiftStaffings = await this.prisma.houseShiftStaffing.findMany({
+      where: {
+        houseId,
+        shift: {
+          scheduleDate: {
+            gte: todayStart,
+            lte: todayEnd,
+          },
+        },
+      },
+      include: {
+        employee: true,
+        shift: true,
+      },
+    });
+
+    // =========================
+    // Incidents
+    // =========================
+    const incidents = await this.prisma.houseComplianceIncident.findMany({
+      where: { houseId, resolved: false },
+      orderBy: [{ status: 'desc' }, { createdAt: 'desc' }],
+    });
+
+    // =========================
+    // Derived metrics
+    // =========================
+    const intensiveResidents = residents.filter(
+      (r) => (r.behaviorSupportLevel || '').toUpperCase() === 'INTENSIVE',
+    ).length;
+
+    const awakeShifts = shifts.filter((s) => s.awakeMonitoringRequired).length;
+
+    const unstaffedShifts = shifts.filter(
+      (s) => s.houseShiftStaffings.length === 0,
+    ).length;
+
+    const onDutyStaffIds = new Set<string>();
+
+    for (const s of todayShiftStaffings) {
+      if (
+        this.isNowWithinShiftWindow(
+          s.shift.plannedStart,
+          s.shift.plannedEnd,
+          now,
+        )
+      ) {
+        onDutyStaffIds.add(s.employeeId);
+      }
+    }
+
+    // =========================
+    // Coverage
+    // =========================
+    const coverage = shifts.map((shift) => {
+      const staff =
+        shift.houseShiftStaffings.length > 0
+          ? shift.houseShiftStaffings.map((hs) =>
+            this.employeeFullName(hs.employee),
+          )
+          : this.fallbackShiftStaff(shift).map((s) => s.name);
+
+      return {
+        id: shift.id,
+        time: `${this.toHourMinute(shift.plannedStart)} - ${this.toHourMinute(
+          shift.plannedEnd,
+        )}`,
+        service:
+          shift.service?.serviceName ||
+          shift.service?.serviceCode ||
+          'Service',
+        resident: this.individualFullName(shift.individual),
+        staff,
+        status: shift.status,
+        awake: Boolean(shift.awakeMonitoringRequired),
+        note: shift.notes || shift.backupNote || null,
+      };
+    });
+
+    // =========================
+    // Awake Monitoring
+    // =========================
+    const awakeMonitoring = coverage
+      .filter((c) => c.awake)
+      .map((c) => ({
+        id: c.id,
+        resident: c.resident,
+        time: c.time,
+        staff: c.staff,
+        note: c.note,
+      }));
+
+    // =========================
+    // Notes (from shifts)
+    // =========================
+    const notes = shifts
+      .filter((s) => s.notes || s.backupNote)
+      .slice(0, 6)
+      .map((s) => ({
+        id: s.id,
+        time: s.updatedAt.toISOString(),
+        title: `Update for ${this.individualFullName(s.individual)}`,
+        detail:
+          s.notes ||
+          s.backupNote ||
+          'Shift updated with no additional details.',
+        level: s.awakeMonitoringRequired ? 'WARNING' : 'INFO',
+      }));
+
+    // =========================
+    // Incidents map
+    // =========================
+    const mappedIncidents = incidents.map((i) => ({
+      id: i.id,
+      title: i.title,
+      detail: i.detail,
+      status: i.status as 'GOOD' | 'WARNING' | 'CRITICAL',
+    }));
+
+    // =========================
+    // Summary
+    // =========================
+    const summary = {
+      todayShifts: shifts.length,
+      awakeShifts,
+      onDutyStaff: onDutyStaffIds.size,
+      intensiveResidents,
+      openIncidents: mappedIncidents.length,
+      unstaffedShifts,
+    };
+
+    // =========================
+    // Phase 2 modules
+    // =========================
+    const phase2 = [
+      {
+        key: 'meals',
+        label: 'Meals',
+        description: 'Meal tracking not connected yet',
+      },
+      {
+        key: 'medications',
+        label: 'Medication',
+        description: 'Medication administration not connected yet',
+      },
+      {
+        key: 'appointments',
+        label: 'Appointments',
+        description: 'Appointment records not connected yet',
+      },
+      {
+        key: 'chores',
+        label: 'Chores',
+        description: 'House routine tracking not connected yet',
+      },
+      {
+        key: 'specialists',
+        label: 'Specialist Visits',
+        description: 'Specialist visit tracking not connected yet',
+      },
+    ];
+
+    return {
+      houseId: house.id,
+      houseName: house.name,
+      summary,
+      coverage,
+      awakeMonitoring,
+      notes,
+      incidents: mappedIncidents,
+      phase2,
+    };
   }
 
   private monthDiff(from: Date, to: Date): number {

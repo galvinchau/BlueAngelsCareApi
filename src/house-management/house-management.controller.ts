@@ -1,4 +1,3 @@
-// bac-hms/bac-api/src/house-management/house-management.controller.ts
 import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { HouseManagementService } from './house-management.service';
 
@@ -39,6 +38,11 @@ export class HouseManagementController {
   @Get('compliance/:houseId')
   async getCompliance(@Param('houseId') houseId: string) {
     return this.houseManagementService.getCompliance(houseId);
+  }
+
+  @Get('operations/:houseId')
+  async getOperations(@Param('houseId') houseId: string) {
+    return this.houseManagementService.getOperations(houseId);
   }
 
   @Get('available-individuals')
