@@ -3,7 +3,7 @@ import { HouseManagementService } from './house-management.service';
 
 @Controller('house-management')
 export class HouseManagementController {
-  constructor(private readonly houseManagementService: HouseManagementService) {}
+  constructor(private readonly houseManagementService: HouseManagementService) { }
 
   @Get('houses')
   async getHouses(
@@ -41,8 +41,11 @@ export class HouseManagementController {
   }
 
   @Get('operations/:houseId')
-  async getOperations(@Param('houseId') houseId: string) {
-    return this.houseManagementService.getOperations(houseId);
+  async getOperations(
+    @Param('houseId') houseId: string,
+    @Query('date') date?: string, // YYYY-MM-DD
+  ) {
+    return this.houseManagementService.getOperations(houseId, date);
   }
 
   @Get('available-individuals')

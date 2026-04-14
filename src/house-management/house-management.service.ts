@@ -2451,7 +2451,7 @@ export class HouseManagementService {
     return rows;
   }
 
-  async getOperations(houseId: string) {
+  async getOperations(houseId: string, date?: string) {
     const house = await this.prisma.house.findUnique({
       where: { id: houseId },
       select: { id: true, name: true },
@@ -2461,8 +2461,15 @@ export class HouseManagementService {
       throw new NotFoundException('House not found');
     }
 
-    const todayStart = this.startOfToday();
-    const todayEnd = this.endOfToday();
+    const targetDate = date ? new Date(date) : new Date();
+
+    targetDate.setHours(0, 0, 0, 0);
+
+    const todayStart = new Date(targetDate);
+
+    const todayEnd = new Date(targetDate);
+    todayEnd.setDate(todayEnd.getDate() + 1);
+
     const now = new Date();
 
     // =========================
