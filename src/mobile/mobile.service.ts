@@ -7,7 +7,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { ScheduleStatus, VisitSource, type Individual } from '@prisma/client';
+import {
+  ScheduleStatus,
+  ServiceAddressType,
+  VisitSource,
+  type Individual,
+} from '@prisma/client';
 import { DateTime } from 'luxon';
 import { PrismaService } from '../prisma/prisma.service';
 import { GoogleReportsService } from '../reports/google-reports.service';
@@ -206,6 +211,34 @@ function formatAddress(ind: Individual): string {
     .filter((p) => !!p);
 
   return parts.join(', ');
+}
+
+function formatSecondaryAddress(ind: any): string {
+  const parts = [
+    ind.secondaryAddress1 ?? '',
+    ind.secondaryCity ?? '',
+    ind.secondaryState ?? '',
+    ind.secondaryZip ?? '',
+  ]
+    .map((p: string) => String(p || '').trim())
+    .filter((p: string) => !!p);
+
+  return parts.join(', ');
+}
+
+function resolveServiceAddressForShift(params: {
+  individual: any;
+  serviceAddressType?: ServiceAddressType | string | null;
+}): string {
+  const useSecondary =
+    String(params.serviceAddressType || '').toUpperCase() === 'SECONDARY';
+
+  if (useSecondary) {
+    const secondary = formatSecondaryAddress(params.individual);
+    if (secondary) return secondary;
+  }
+
+  return formatAddress(params.individual as Individual);
 }
 
 function formatAddressLines(ind: Individual): {
@@ -1305,6 +1338,19 @@ export class MobileService {
         scheduleDate: true,
         plannedStart: true,
         serviceId: true,
+        serviceAddressType: true,
+        individual: {
+          select: {
+            address1: true,
+            city: true,
+            state: true,
+            zip: true,
+            secondaryAddress1: true,
+            secondaryCity: true,
+            secondaryState: true,
+            secondaryZip: true,
+          },
+        },
       },
     });
 
@@ -1345,8 +1391,17 @@ export class MobileService {
     const underHours = lostMinutes > 0 ? minutesToHoursStr(lostMinutes) : '';
     const overHours = overMinutes > 0 ? minutesToHoursStr(overMinutes) : '';
 
+    const resolvedIndividualAddress =
+      shift?.individual
+        ? resolveServiceAddressForShift({
+            individual: shift.individual,
+            serviceAddressType: shift.serviceAddressType ?? null,
+          })
+        : payload.individualAddress ?? '';
+
     const computedPayload: any = {
       ...payload,
+      individualAddress: resolvedIndividualAddress,
       date: getShiftLocalDate(
         { scheduleDate: shift?.scheduleDate, plannedStart: shift?.plannedStart },
         date,

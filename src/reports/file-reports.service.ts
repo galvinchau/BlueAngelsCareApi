@@ -1,4 +1,4 @@
-// src/reports/file-reports.service.ts
+// bac-hms/bac-api/src/reports/file-reports.service.ts
 import type { Response } from 'express';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Injectable } from '@nestjs/common';
@@ -19,6 +19,7 @@ import CloudConvert from 'cloudconvert';
 const TZ = 'America/New_York';
 
 type ReportType = 'staff' | 'individual';
+type ServiceAddressType = 'PRIMARY' | 'SECONDARY';
 
 @Injectable()
 export class FileReportsService {
@@ -473,11 +474,21 @@ export class FileReportsService {
   // DB autofill: Individual & MA
   // -----------------------------
   private async getIndividualAutofill(individualId?: string | null): Promise<{
-    address1: string;
-    address2Line: string;
+    primaryAddress1: string;
+    primaryAddress2Line: string;
+    secondaryAddress1: string;
+    secondaryAddress2Line: string;
     ma: string;
   }> {
-    if (!individualId) return { address1: '', address2Line: '', ma: '' };
+    if (!individualId) {
+      return {
+        primaryAddress1: '',
+        primaryAddress2Line: '',
+        secondaryAddress1: '',
+        secondaryAddress2Line: '',
+        ma: '',
+      };
+    }
 
     const ind = await this.prisma.individual.findUnique({
       where: { id: individualId },
@@ -487,32 +498,64 @@ export class FileReportsService {
         city: true,
         state: true,
         zip: true,
+        secondaryAddress1: true,
+        secondaryAddress2: true,
+        secondaryCity: true,
+        secondaryState: true,
+        secondaryZip: true,
         payers: {
           select: { type: true, memberId: true },
         },
       },
     });
 
-    if (!ind) return { address1: '', address2Line: '', ma: '' };
+    if (!ind) {
+      return {
+        primaryAddress1: '',
+        primaryAddress2Line: '',
+        secondaryAddress1: '',
+        secondaryAddress2Line: '',
+        ma: '',
+      };
+    }
 
-    const address1 = this.safeStr(ind.address1 ?? '');
+    const primaryAddress1 = this.safeStr(ind.address1 ?? '');
 
-    const city = this.safeStr(ind.city ?? '');
-    const state = this.safeStr(ind.state ?? '');
-    const zip = this.safeStr(ind.zip ?? '');
-    const addr2 = this.safeStr(ind.address2 ?? '');
+    const primaryCity = this.safeStr(ind.city ?? '');
+    const primaryState = this.safeStr(ind.state ?? '');
+    const primaryZip = this.safeStr(ind.zip ?? '');
+    const primaryAddr2 = this.safeStr(ind.address2 ?? '');
 
-    const cityLine = [city, state, zip]
+    const primaryCityLine = [primaryCity, primaryState, primaryZip]
       .filter(Boolean)
       .join(', ')
       .replace(', ,', ',')
       .trim();
 
-    const address2Line = addr2
-      ? cityLine
-        ? `${addr2} • ${cityLine}`
-        : addr2
-      : cityLine;
+    const primaryAddress2Line = primaryAddr2
+      ? primaryCityLine
+        ? `${primaryAddr2} • ${primaryCityLine}`
+        : primaryAddr2
+      : primaryCityLine;
+
+    const secondaryAddress1 = this.safeStr(ind.secondaryAddress1 ?? '');
+
+    const secondaryCity = this.safeStr(ind.secondaryCity ?? '');
+    const secondaryState = this.safeStr(ind.secondaryState ?? '');
+    const secondaryZip = this.safeStr(ind.secondaryZip ?? '');
+    const secondaryAddr2 = this.safeStr(ind.secondaryAddress2 ?? '');
+
+    const secondaryCityLine = [secondaryCity, secondaryState, secondaryZip]
+      .filter(Boolean)
+      .join(', ')
+      .replace(', ,', ',')
+      .trim();
+
+    const secondaryAddress2Line = secondaryAddr2
+      ? secondaryCityLine
+        ? `${secondaryAddr2} • ${secondaryCityLine}`
+        : secondaryAddr2
+      : secondaryCityLine;
 
     const primary = (ind.payers ?? []).find(
       (p) => String(p.type).toLowerCase() === 'primary',
@@ -520,7 +563,13 @@ export class FileReportsService {
     const anyPayer = (ind.payers ?? [])[0];
     const ma = this.safeStr(primary?.memberId ?? anyPayer?.memberId ?? '');
 
-    return { address1, address2Line, ma };
+    return {
+      primaryAddress1,
+      primaryAddress2Line,
+      secondaryAddress1,
+      secondaryAddress2Line,
+      ma,
+    };
   }
 
   private async getOutcomeAutofill(
@@ -542,7 +591,43 @@ export class FileReportsService {
     return this.safeStr(outcome);
   }
 
-  private async buildTemplateData(dn: any, reportType: ReportType) {
+  private normalizeServiceAddressType(v: any): ServiceAddressType {
+    return String(v || '').trim().toUpperCase() === 'SECONDARY'
+      ? 'SECONDARY'
+      : 'PRIMARY';
+  }
+
+  private async getDailyNoteServiceAddressType(
+    dn: any,
+    payload: any,
+  ): Promise<ServiceAddressType> {
+    const payloadType =
+      payload?.serviceAddressType ??
+      payload?.ServiceAddressType ??
+      payload?.service_address_type;
+
+    if (payloadType) {
+      return this.normalizeServiceAddressType(payloadType);
+    }
+
+    const shiftId = this.safeStr(dn?.shiftId || '');
+    if (!shiftId) return 'PRIMARY';
+
+    try {
+      const shift: any = await this.prisma.scheduleShift.findUnique({
+        where: { id: shiftId },
+        select: {
+          serviceAddressType: true,
+        } as any,
+      });
+
+      return this.normalizeServiceAddressType(shift?.serviceAddressType);
+    } catch {
+      return 'PRIMARY';
+    }
+  }
+
+  async buildTemplateData(dn: any, reportType: ReportType) {
     const dateISO =
       dn.date instanceof Date
         ? this.localDateISO(dn.date)
@@ -554,6 +639,10 @@ export class FileReportsService {
 
     const auto = await this.getIndividualAutofill(dn.individualId ?? null);
     const outcomeAuto = await this.getOutcomeAutofill(dn.individualId ?? null);
+    const serviceAddressType = await this.getDailyNoteServiceAddressType(
+      dn,
+      payload,
+    );
 
     const sig = this.extractSignatureDataUrls(payload);
 
@@ -676,15 +765,25 @@ export class FileReportsService {
 
     const mileage = dn.mileage ?? payload.mileage ?? payload.totalMileage ?? '';
 
+    const selectedDbAddress1 =
+      serviceAddressType === 'SECONDARY'
+        ? auto.secondaryAddress1
+        : auto.primaryAddress1;
+
+    const selectedDbAddress2 =
+      serviceAddressType === 'SECONDARY'
+        ? auto.secondaryAddress2Line
+        : auto.primaryAddress2Line;
+
     const address1DbFirst =
-      auto.address1 ||
+      selectedDbAddress1 ||
       payload.patientAddress1 ||
       payload.individualAddress1 ||
       payload.individualAddress ||
       '';
 
     const address2DbFirst =
-      auto.address2Line ||
+      selectedDbAddress2 ||
       payload.patientAddress2 ||
       payload.individualAddress2 ||
       '';

@@ -3,6 +3,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import {
   BillingPayer,
   ScheduleStatus,
+  ServiceAddressType,
   VisitSource as PrismaVisitSource,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -238,6 +239,77 @@ export class VisitedMaintenanceService {
     }
   }
 
+  private pickServiceAddress(params: {
+    serviceAddressType?: ServiceAddressType | null;
+    individual: {
+      address1?: string | null;
+      address2?: string | null;
+      city?: string | null;
+      state?: string | null;
+      zip?: string | null;
+      secondaryAddress1?: string | null;
+      secondaryAddress2?: string | null;
+      secondaryCity?: string | null;
+      secondaryState?: string | null;
+      secondaryZip?: string | null;
+    };
+  }) {
+    const addressType =
+      params.serviceAddressType === ServiceAddressType.SECONDARY
+        ? ServiceAddressType.SECONDARY
+        : ServiceAddressType.PRIMARY;
+
+    const primary = {
+      address1: params.individual.address1 ?? null,
+      address2: params.individual.address2 ?? null,
+      city: params.individual.city ?? null,
+      state: params.individual.state ?? null,
+      zip: params.individual.zip ?? null,
+    };
+
+    const secondary = {
+      address1: params.individual.secondaryAddress1 ?? null,
+      address2: params.individual.secondaryAddress2 ?? null,
+      city: params.individual.secondaryCity ?? null,
+      state: params.individual.secondaryState ?? null,
+      zip: params.individual.secondaryZip ?? null,
+    };
+
+    const hasSecondary =
+      Boolean(String(secondary.address1 || '').trim()) ||
+      Boolean(String(secondary.address2 || '').trim()) ||
+      Boolean(String(secondary.city || '').trim()) ||
+      Boolean(String(secondary.state || '').trim()) ||
+      Boolean(String(secondary.zip || '').trim());
+
+    const chosen =
+      addressType === ServiceAddressType.SECONDARY && hasSecondary
+        ? secondary
+        : primary;
+
+    const effectiveType =
+      addressType === ServiceAddressType.SECONDARY && hasSecondary
+        ? ServiceAddressType.SECONDARY
+        : ServiceAddressType.PRIMARY;
+
+    return {
+      serviceAddressType: effectiveType,
+      address1: chosen.address1,
+      address2: chosen.address2,
+      city: chosen.city,
+      state: chosen.state,
+      zip: chosen.zip,
+      fullAddress:
+        formatFullAddress({
+          address1: chosen.address1,
+          address2: chosen.address2,
+          city: chosen.city,
+          state: chosen.state,
+          zip: chosen.zip,
+        }) || null,
+    };
+  }
+
   async listVisits() {
     const visits = await this.prisma.visit.findMany({
       orderBy: { checkInAt: 'desc' },
@@ -293,7 +365,6 @@ export class VisitedMaintenanceService {
       noteLinks.map((x) => x.visitId).filter((x): x is string => Boolean(x)),
     );
 
-    // Load rates one time only to avoid connection-pool pressure
     const serviceIds = Array.from(
       new Set(
         visits.map((v) => v.service?.id).filter((x): x is string => Boolean(x)),
@@ -426,6 +497,11 @@ export class VisitedMaintenanceService {
             city: true,
             state: true,
             zip: true,
+            secondaryAddress1: true,
+            secondaryAddress2: true,
+            secondaryCity: true,
+            secondaryState: true,
+            secondaryZip: true,
           },
         },
         dsp: {
@@ -450,6 +526,7 @@ export class VisitedMaintenanceService {
             plannedEnd: true,
             status: true,
             cancelReason: true,
+            serviceAddressType: true,
           },
         },
       },
@@ -467,16 +544,13 @@ export class VisitedMaintenanceService {
 
     const dspName = buildFullName([visit.dsp.firstName, visit.dsp.lastName]);
 
-    const fullAddress = formatFullAddress({
-      address1: visit.individual.address1,
-      address2: visit.individual.address2,
-      city: visit.individual.city,
-      state: visit.individual.state,
-      zip: visit.individual.zip,
+    const selectedAddress = this.pickServiceAddress({
+      serviceAddressType: visit.scheduleShift?.serviceAddressType ?? null,
+      individual: visit.individual,
     });
 
-    const homeCoords = fullAddress
-      ? await this.geocodeAddress(fullAddress)
+    const homeCoords = selectedAddress.fullAddress
+      ? await this.geocodeAddress(selectedAddress.fullAddress)
       : null;
 
     const visitLat =
@@ -518,14 +592,15 @@ export class VisitedMaintenanceService {
       individual: {
         id: visit.individual.id,
         name: individualName,
-        address1: visit.individual.address1 ?? null,
-        address2: visit.individual.address2 ?? null,
-        city: visit.individual.city ?? null,
-        state: visit.individual.state ?? null,
-        zip: visit.individual.zip ?? null,
-        fullAddress: fullAddress || null,
+        address1: selectedAddress.address1,
+        address2: selectedAddress.address2,
+        city: selectedAddress.city,
+        state: selectedAddress.state,
+        zip: selectedAddress.zip,
+        fullAddress: selectedAddress.fullAddress,
         homeLat: homeCoords?.lat ?? null,
         homeLng: homeCoords?.lng ?? null,
+        serviceAddressType: selectedAddress.serviceAddressType,
       },
 
       dsp: {
@@ -544,6 +619,7 @@ export class VisitedMaintenanceService {
         plannedDate: toIsoDateInNewYork(visit.scheduleShift?.scheduleDate) || null,
         plannedStart: toHmInNewYork(visit.scheduleShift?.plannedStart),
         plannedEnd: toHmInNewYork(visit.scheduleShift?.plannedEnd),
+        serviceAddressType: selectedAddress.serviceAddressType,
       },
 
       visit: {
