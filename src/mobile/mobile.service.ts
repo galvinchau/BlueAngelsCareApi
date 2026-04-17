@@ -47,6 +47,7 @@ export interface MobileShift {
   visitEnd?: string | null;
   outcomeText?: string | null;
   awakeMonitoringRequired?: boolean;
+  isNoteSubmitted?: boolean;
 }
 
 export interface MobileDailyNotePayload {
@@ -320,8 +321,9 @@ function mapShiftToMobileShift(params: {
   shift: any;
   staffIds: string[];
   date?: string;
+  isNoteSubmitted?: boolean;
 }): MobileShift {
-  const { shift, staffIds, date } = params;
+  const { shift, staffIds, date, isNoteSubmitted } = params;
   const individual = shift.individual;
   const service = shift.service;
   const visits = shift.visits ?? [];
@@ -387,6 +389,7 @@ function mapShiftToMobileShift(params: {
     visitEnd,
     outcomeText: null,
     awakeMonitoringRequired: shift.awakeMonitoringRequired === true,
+    isNoteSubmitted: Boolean(isNoteSubmitted),
   };
 }
 
@@ -394,8 +397,9 @@ function mapShiftToMobileShiftForClientDetail(params: {
   shift: any;
   date?: string;
   staffIds?: string[];
+  isNoteSubmitted?: boolean;
 }): MobileShift {
-  const { shift, date, staffIds } = params;
+  const { shift, date, staffIds, isNoteSubmitted } = params;
   const individual = shift.individual;
   const service = shift.service;
   const visits = shift.visits ?? [];
@@ -461,6 +465,7 @@ function mapShiftToMobileShiftForClientDetail(params: {
     visitEnd,
     outcomeText: null,
     awakeMonitoringRequired: shift.awakeMonitoringRequired === true,
+    isNoteSubmitted: Boolean(isNoteSubmitted),
   };
 }
 
@@ -1156,9 +1161,32 @@ export class MobileService {
       orderBy: { plannedStart: 'asc' },
     });
 
+    const shiftIds = shifts.map((s) => s.id);
+    let submittedShiftIdSet = new Set<string>();
+
+    if (shiftIds.length > 0) {
+      const notes = await this.prisma.dailyNote.findMany({
+        where: {
+          shiftId: { in: shiftIds },
+        },
+        select: {
+          shiftId: true,
+        },
+      });
+
+      submittedShiftIdSet = new Set(
+        notes.map((n) => n.shiftId).filter(Boolean),
+      );
+    }
+
     return {
       shifts: shifts.map((s) =>
-        mapShiftToMobileShift({ shift: s, staffIds, date }),
+        mapShiftToMobileShift({
+          shift: s,
+          staffIds,
+          date,
+          isNoteSubmitted: submittedShiftIdSet.has(s.id),
+        }),
       ),
     };
   }
@@ -1227,13 +1255,36 @@ export class MobileService {
       orderBy: [{ scheduleDate: 'asc' }, { plannedStart: 'asc' }],
     });
 
+    const shiftIds = shifts.map((s) => s.id);
+    let submittedShiftIdSet = new Set<string>();
+
+    if (shiftIds.length > 0) {
+      const notes = await this.prisma.dailyNote.findMany({
+        where: {
+          shiftId: { in: shiftIds },
+        },
+        select: {
+          shiftId: true,
+        },
+      });
+
+      submittedShiftIdSet = new Set(
+        notes.map((n) => n.shiftId).filter(Boolean),
+      );
+    }
+
     return {
       shifts: shifts.map((s) => {
         const d = DateTime.fromJSDate(s.scheduleDate)
           .setZone(TZ)
           .toISODate() as string;
 
-        return mapShiftToMobileShift({ shift: s, staffIds, date: d });
+        return mapShiftToMobileShift({
+          shift: s,
+          staffIds,
+          date: d,
+          isNoteSubmitted: submittedShiftIdSet.has(s.id),
+        });
       }),
     };
   }
@@ -1297,12 +1348,31 @@ export class MobileService {
       orderBy: { plannedStart: 'asc' },
     });
 
+    const shiftIds = shifts.map((s) => s.id);
+    let submittedShiftIdSet = new Set<string>();
+
+    if (shiftIds.length > 0) {
+      const notes = await this.prisma.dailyNote.findMany({
+        where: {
+          shiftId: { in: shiftIds },
+        },
+        select: {
+          shiftId: true,
+        },
+      });
+
+      submittedShiftIdSet = new Set(
+        notes.map((n) => n.shiftId).filter(Boolean),
+      );
+    }
+
     return {
       shifts: shifts.map((s) =>
         mapShiftToMobileShiftForClientDetail({
           shift: s,
           date,
           staffIds,
+          isNoteSubmitted: submittedShiftIdSet.has(s.id),
         }),
       ),
     };
