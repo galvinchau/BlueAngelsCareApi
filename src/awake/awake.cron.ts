@@ -131,15 +131,24 @@ export class AwakeCronService {
             title: 'Awake Check Required',
             body: 'Please confirm you are awake for your shift now.',
             sound: 'default',
+
+            // ✅ Required for mobile notification action button: "I am Awake"
+            categoryId: 'AWAKE_MONITORING',
+
             data: {
               type: 'AWAKE_REMINDER',
               visitId: visit.id,
               shiftId: visit.scheduleShiftId ?? null,
+
+              // ✅ Required so App.tsx can confirm directly from notification action
+              staffId: visit.dspId,
+              dspId: visit.dspId,
+
               nextDueAt: visit.nextAwakeConfirmDueAt?.toISOString() ?? null,
               deadlineAt: visit.awakeDeadlineAt?.toISOString() ?? null,
               ts: new Date().toISOString(),
             },
-          });
+          } as any);
 
           await this.logAwakeEvent({
             visitId: visit.id,
@@ -154,6 +163,7 @@ export class AwakeCronService {
               source: 'AWAKE_CRON_REMINDER',
               nextDueAt: visit.nextAwakeConfirmDueAt?.toISOString() ?? null,
               deadlineAt: visit.awakeDeadlineAt?.toISOString() ?? null,
+              categoryId: 'AWAKE_MONITORING',
             },
           });
 
@@ -390,6 +400,11 @@ export class AwakeCronService {
             type: 'AWAKE_AUTO_CHECKOUT',
             visitId,
             shiftId: pushShiftId,
+
+            // ✅ Added only for consistency/debugging
+            staffId: pushTargetStaffId,
+            dspId: pushTargetStaffId,
+
             reason: 'FAIL_CONFIRM_AWAKE',
             ts: new Date().toISOString(),
           },

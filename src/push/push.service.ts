@@ -10,6 +10,7 @@ export type PushPayload = {
   body: string;
   data?: Record<string, any>;
   sound?: 'default' | null;
+  categoryId?: string;
 };
 
 type ExpoPushMessage = {
@@ -20,6 +21,7 @@ type ExpoPushMessage = {
   sound?: 'default';
   priority?: 'default' | 'normal' | 'high';
   channelId?: string;
+  categoryId?: string;
 };
 
 @Injectable()
@@ -109,6 +111,9 @@ export class PushService {
       ...(payload.sound === 'default' ? { sound: 'default' } : {}),
       priority: 'high',
       channelId: 'default',
+
+      // ✅ Required for notification action buttons
+      ...(payload.categoryId ? { categoryId: payload.categoryId } : {}),
     }));
 
     const response = await this.sendExpoMessages(messages);
