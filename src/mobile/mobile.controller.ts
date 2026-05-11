@@ -1,3 +1,7 @@
+// ======================================================
+//  bac-hms/bac-api/src/mobile/mobile.controller.ts
+// ======================================================
+
 import {
   BadRequestException,
   Body,
@@ -71,6 +75,26 @@ type ShiftCancelledPushBody = {
   serviceName?: string | null;
   shiftDateLabel?: string | null;
   shiftTimeLabel?: string | null;
+  note?: string | null;
+};
+
+type ShiftAlertPushBody = {
+  staffId: string;
+  alertType:
+    | 'SHIFT_CANCELLED'
+    | 'SHIFT_TIME_CHANGED'
+    | 'SHIFT_REASSIGNED_REMOVED'
+    | 'SHIFT_REASSIGNED_ASSIGNED'
+    | 'SHIFT_DETAILS_CHANGED';
+  shiftId?: string;
+  individualName?: string | null;
+  serviceName?: string | null;
+  shiftDateLabel?: string | null;
+  shiftTimeLabel?: string | null;
+  oldShiftTimeLabel?: string | null;
+  newShiftTimeLabel?: string | null;
+  oldShiftDateLabel?: string | null;
+  newShiftDateLabel?: string | null;
   note?: string | null;
 };
 
@@ -451,6 +475,47 @@ export class MobileController {
       serviceName: body?.serviceName ?? null,
       shiftDateLabel: body?.shiftDateLabel ?? null,
       shiftTimeLabel: body?.shiftTimeLabel ?? null,
+      note: body?.note ?? null,
+    });
+  }
+
+  /**
+   * ✅ NEW
+   * POST /mobile/push/shift-alert
+   */
+  @Post('push/shift-alert')
+  sendShiftAlertPush(@Body() body: ShiftAlertPushBody) {
+    const staffId = String(body?.staffId ?? '').trim();
+    const alertType = String(body?.alertType ?? '').trim() as ShiftAlertPushBody['alertType'];
+
+    if (!staffId) {
+      throw new BadRequestException('Missing staffId');
+    }
+
+    const allowedTypes = [
+      'SHIFT_CANCELLED',
+      'SHIFT_TIME_CHANGED',
+      'SHIFT_REASSIGNED_REMOVED',
+      'SHIFT_REASSIGNED_ASSIGNED',
+      'SHIFT_DETAILS_CHANGED',
+    ];
+
+    if (!allowedTypes.includes(alertType)) {
+      throw new BadRequestException('Invalid alertType');
+    }
+
+    return this.mobileService.sendShiftAlertPush({
+      staffId,
+      alertType,
+      shiftId: body?.shiftId,
+      individualName: body?.individualName ?? null,
+      serviceName: body?.serviceName ?? null,
+      shiftDateLabel: body?.shiftDateLabel ?? null,
+      shiftTimeLabel: body?.shiftTimeLabel ?? null,
+      oldShiftTimeLabel: body?.oldShiftTimeLabel ?? null,
+      newShiftTimeLabel: body?.newShiftTimeLabel ?? null,
+      oldShiftDateLabel: body?.oldShiftDateLabel ?? null,
+      newShiftDateLabel: body?.newShiftDateLabel ?? null,
       note: body?.note ?? null,
     });
   }

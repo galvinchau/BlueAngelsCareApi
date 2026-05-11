@@ -594,7 +594,7 @@ export class MobileService {
     private readonly prisma: PrismaService,
     private readonly reportsService: GoogleReportsService,
     private readonly pushService: PushService,
-  ) {}
+  ) { }
 
   private async logAwakeEvent(args: {
     visitId: string;
@@ -603,9 +603,9 @@ export class MobileService {
     dspId: string;
     serviceId?: string | null;
     eventType:
-      | 'CHECK_IN_AWAKE_STARTED'
-      | 'CONFIRMED_AWAKE'
-      | 'MANUAL_CHECKOUT';
+    | 'CHECK_IN_AWAKE_STARTED'
+    | 'CONFIRMED_AWAKE'
+    | 'MANUAL_CHECKOUT';
     eventTime?: Date;
     note?: string | null;
     meta?: Record<string, any> | null;
@@ -907,7 +907,92 @@ export class MobileService {
       },
     });
   }
+  // ✅ ADD THIS METHOD right AFTER sendShiftCancelledPush(...) and BEFORE startUnknownVisit(...)
 
+  async sendShiftAlertPush(input: {
+    staffId: string;
+    alertType:
+    | 'SHIFT_CANCELLED'
+    | 'SHIFT_TIME_CHANGED'
+    | 'SHIFT_REASSIGNED_REMOVED'
+    | 'SHIFT_REASSIGNED_ASSIGNED'
+    | 'SHIFT_DETAILS_CHANGED';
+    shiftId?: string;
+    individualName?: string | null;
+    serviceName?: string | null;
+    shiftDateLabel?: string | null;
+    shiftTimeLabel?: string | null;
+    oldShiftTimeLabel?: string | null;
+    newShiftTimeLabel?: string | null;
+    oldShiftDateLabel?: string | null;
+    newShiftDateLabel?: string | null;
+    note?: string | null;
+  }) {
+    const identity = await this.resolveStaffIdentity(input.staffId);
+    if (!identity) {
+      throw new BadRequestException(`Employee not found: ${input.staffId}`);
+    }
+
+    const alertType = input.alertType;
+
+    const title =
+      alertType === 'SHIFT_CANCELLED'
+        ? 'Assigned Shift Cancelled'
+        : alertType === 'SHIFT_TIME_CHANGED'
+          ? 'Assigned Shift Time Updated'
+          : alertType === 'SHIFT_REASSIGNED_REMOVED'
+            ? 'Removed From Assigned Shift'
+            : alertType === 'SHIFT_REASSIGNED_ASSIGNED'
+              ? 'New Assigned Shift'
+              : 'Assigned Shift Details Updated';
+
+    const headline =
+      alertType === 'SHIFT_CANCELLED'
+        ? 'Your assigned shift has been cancelled.'
+        : alertType === 'SHIFT_TIME_CHANGED'
+          ? 'Your assigned shift time has been updated.'
+          : alertType === 'SHIFT_REASSIGNED_REMOVED'
+            ? 'You have been removed from this shift.'
+            : alertType === 'SHIFT_REASSIGNED_ASSIGNED'
+              ? 'You have been assigned to this shift.'
+              : 'Your assigned shift details have been updated.';
+
+    const detailParts = [
+      input.individualName ? `Individual: ${input.individualName}` : null,
+      input.serviceName ? `Service: ${input.serviceName}` : null,
+      input.shiftDateLabel ? `Date: ${input.shiftDateLabel}` : null,
+      input.shiftTimeLabel ? `Time: ${input.shiftTimeLabel}` : null,
+      input.oldShiftTimeLabel ? `Old time: ${input.oldShiftTimeLabel}` : null,
+      input.newShiftTimeLabel ? `New time: ${input.newShiftTimeLabel}` : null,
+      input.oldShiftDateLabel ? `Old date: ${input.oldShiftDateLabel}` : null,
+      input.newShiftDateLabel ? `New date: ${input.newShiftDateLabel}` : null,
+    ].filter(Boolean);
+
+    const body =
+      detailParts.length > 0
+        ? `${headline}\n${detailParts.join('\n')}`
+        : `${headline} Please check the app or contact the office.`;
+
+    return this.pushService.sendToStaff(identity.techId, {
+      title,
+      body,
+      sound: 'default',
+      data: {
+        type: alertType,
+        shiftId: input.shiftId ?? null,
+        individualName: input.individualName ?? null,
+        serviceName: input.serviceName ?? null,
+        shiftDateLabel: input.shiftDateLabel ?? null,
+        shiftTimeLabel: input.shiftTimeLabel ?? null,
+        oldShiftTimeLabel: input.oldShiftTimeLabel ?? null,
+        newShiftTimeLabel: input.newShiftTimeLabel ?? null,
+        oldShiftDateLabel: input.oldShiftDateLabel ?? null,
+        newShiftDateLabel: input.newShiftDateLabel ?? null,
+        note: input.note ?? null,
+        ts: new Date().toISOString(),
+      },
+    });
+  }
   async startUnknownVisit(
     input: StartUnknownVisitInput,
   ): Promise<{ shiftId: string }> {
@@ -1057,19 +1142,19 @@ export class MobileService {
     const nameWhere =
       tokens.length >= 2
         ? {
-            AND: tokens.slice(0, 3).map((t) => ({
-              OR: [
-                { firstName: { contains: t, mode: 'insensitive' as const } },
-                { lastName: { contains: t, mode: 'insensitive' as const } },
-              ],
-            })),
-          }
-        : {
+          AND: tokens.slice(0, 3).map((t) => ({
             OR: [
-              { firstName: { contains: q, mode: 'insensitive' as const } },
-              { lastName: { contains: q, mode: 'insensitive' as const } },
+              { firstName: { contains: t, mode: 'insensitive' as const } },
+              { lastName: { contains: t, mode: 'insensitive' as const } },
             ],
-          };
+          })),
+        }
+        : {
+          OR: [
+            { firstName: { contains: q, mode: 'insensitive' as const } },
+            { lastName: { contains: q, mode: 'insensitive' as const } },
+          ],
+        };
 
     const rows = await this.prisma.individual.findMany({
       where: {
@@ -1314,15 +1399,15 @@ export class MobileService {
 
     const openVisitOrConditions = staffIds?.length
       ? [
-          {
-            visits: {
-              some: {
-                dspId: { in: staffIds },
-                checkOutAt: { equals: null },
-              },
+        {
+          visits: {
+            some: {
+              dspId: { in: staffIds },
+              checkOutAt: { equals: null },
             },
           },
-        ]
+        },
+      ]
       : [];
 
     const shifts = await this.prisma.scheduleShift.findMany({
@@ -1464,9 +1549,9 @@ export class MobileService {
     const resolvedIndividualAddress =
       shift?.individual
         ? resolveServiceAddressForShift({
-            individual: shift.individual,
-            serviceAddressType: shift.serviceAddressType ?? null,
-          })
+          individual: shift.individual,
+          serviceAddressType: shift.serviceAddressType ?? null,
+        })
         : payload.individualAddress ?? '';
 
     const computedPayload: any = {
@@ -1692,9 +1777,9 @@ export class MobileService {
       if (shouldBackfillGps || shouldEnableAwakeNow) {
         const awakeData = shouldEnableAwakeNow
           ? buildAwakeMonitoringCreateData(
-              existingOpen.checkInAt ?? checkInAt,
-              true,
-            )
+            existingOpen.checkInAt ?? checkInAt,
+            true,
+          )
           : {};
 
         const updatedExisting = await this.prisma.visit.update({
@@ -2021,13 +2106,13 @@ export class MobileService {
       latestOpenVisit?.scheduleShiftId === shiftId
         ? latestOpenVisit
         : await this.prisma.visit.findFirst({
-            where: {
-              scheduleShiftId: shiftId,
-              dspId: { in: staffIds },
-              checkOutAt: null,
-            },
-            orderBy: { checkInAt: 'desc' },
-          });
+          where: {
+            scheduleShiftId: shiftId,
+            dspId: { in: staffIds },
+            checkOutAt: null,
+          },
+          orderBy: { checkInAt: 'desc' },
+        });
 
     let timesheetId: string;
 
